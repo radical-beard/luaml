@@ -3,13 +3,31 @@ use std::collections::HashMap;
 use crate::pattern::{ListPattern, Pattern};
 use crate::types::{FieldBindings, FieldValue};
 
+/// The reserved enum value that matches any enum (and a missing field in
+/// `match_fields`). Used by scripts that declare `surface: :global:` to
+/// indicate they are universal — loaded into every engine and eligible on
+/// any surface the dispatcher emits.
+pub const GLOBAL_ENUM: &str = "global";
+
+fn is_global_enum(pattern: &Pattern) -> bool {
+    matches!(pattern, Pattern::Enum(name) if name == GLOBAL_ENUM)
+}
+
 /// Match a single pattern against a single FieldValue.
 /// Returns `Some(bindings)` on match, `None` on mismatch.
 /// Enums and strings are type-distinct: Pattern::Enum only matches FieldValue::Enum,
 /// Pattern::StringLiteral only matches FieldValue::String.
+///
+/// Special case: `Pattern::Enum("global")` matches any `FieldValue::Enum`.
+/// See `match_fields` for the absence-tolerant behavior that pairs with it.
 pub fn match_field_value(pattern: &Pattern, value: &FieldValue) -> Option<FieldBindings> {
     match pattern {
         Pattern::Wildcard => Some(FieldBindings::new()),
+
+        Pattern::Enum(expected) if expected == GLOBAL_ENUM => match value {
+            FieldValue::Enum(_) => Some(FieldBindings::new()),
+            _ => None,
+        },
 
         Pattern::Enum(expected) => match value {
             FieldValue::Enum(actual) if expected == actual => Some(FieldBindings::new()),
@@ -70,13 +88,25 @@ pub fn match_field_value_with_context(
 /// Match a set of pattern fields against a FieldMap (execution policy vs event).
 /// Every pattern field must have a matching value in the input map.
 /// Extra fields in the input are ignored.
+///
+/// A pattern of `Pattern::Enum("global")` is tolerant of an absent key —
+/// it matches whether the key is missing from the input or carries any
+/// enum value.
 pub fn match_fields(
     pattern_fields: &[(String, Pattern)],
     input: &HashMap<String, FieldValue>,
 ) -> Option<FieldBindings> {
     let mut all_bindings = FieldBindings::new();
     for (key, pattern) in pattern_fields {
-        let value = input.get(key)?;
+        let value = match input.get(key) {
+            Some(v) => v,
+            None => {
+                if is_global_enum(pattern) {
+                    continue;
+                }
+                return None;
+            }
+        };
         let bindings = match_field_value(pattern, value)?;
         all_bindings.extend(bindings);
     }
@@ -207,6 +237,47 @@ mod tests {
     fn enum_rejects_number() {
         let pat = Pattern::Enum("tui".into());
         assert!(match_field_value(&pat, &fv_num(42)).is_none());
+    }
+
+    // ---- :global: universal enum wildcard ----
+
+    #[test]
+    fn global_enum_matches_any_enum_value() {
+        let pat = Pattern::Enum("global".into());
+        assert!(match_field_value(&pat, &fv_enum("tui")).is_some());
+        assert!(match_field_value(&pat, &fv_enum("daemon")).is_some());
+        assert!(match_field_value(&pat, &fv_enum("runner")).is_some());
+        assert!(match_field_value(&pat, &fv_enum("global")).is_some());
+    }
+
+    #[test]
+    fn global_enum_still_rejects_non_enum_values() {
+        let pat = Pattern::Enum("global".into());
+        assert!(match_field_value(&pat, &fv_str("tui")).is_none());
+        assert!(match_field_value(&pat, &fv_num(42)).is_none());
+        assert!(match_field_value(&pat, &fv_bool(true)).is_none());
+    }
+
+    #[test]
+    fn global_enum_matches_missing_field_in_match_fields() {
+        let pattern = vec![("surface".to_string(), Pattern::Enum("global".into()))];
+        let input: HashMap<String, FieldValue> = HashMap::new();
+        assert!(match_fields(&pattern, &input).is_some());
+    }
+
+    #[test]
+    fn non_global_enum_still_requires_field() {
+        let pattern = vec![("surface".to_string(), Pattern::Enum("tui".into()))];
+        let input: HashMap<String, FieldValue> = HashMap::new();
+        assert!(match_fields(&pattern, &input).is_none());
+    }
+
+    #[test]
+    fn global_enum_with_present_mismatched_key_uses_wildcard() {
+        let pattern = vec![("surface".to_string(), Pattern::Enum("global".into()))];
+        let mut input: HashMap<String, FieldValue> = HashMap::new();
+        input.insert("surface".into(), fv_enum("daemon"));
+        assert!(match_fields(&pattern, &input).is_some());
     }
 
     // ---- String literal matching (type-distinct) ----
