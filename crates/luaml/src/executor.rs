@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, Result as LuaResult, Value as LuaValue};
 
-use crate::api::{ApiBinding, ApiHandler};
+use crate::api::{ApiBindingEntry, ApiHandler};
 use crate::clause::Clause;
 use crate::error::LuamlError;
 use crate::pattern_match::match_fields;
@@ -10,46 +10,85 @@ use crate::types::{FieldBindings, FieldMap, FieldValue};
 
 /// Execute a clause with bindings in a Lua environment.
 ///
-/// - Injects bound variables from pattern matching as Lua globals
-/// - Creates API proxy tables for matching ApiBindings
-/// - Executes the Lua behavior body
-pub fn execute_clause(
+/// - Injects pattern-bound variables as locals on the clause's env table.
+/// - Creates API proxy tables for matching `ApiBindingSpec`s.
+/// - Injects the always-on `luaml` namespace (currently: `luaml.dispatch` and
+///   `luaml.enum`). These do not participate in matching.
+/// - Runs the Lua body wrapped in an IIFE (so `return` exits the inner
+///   function instead of the chunk).
+///
+/// Returns the ordered list of `FieldMap`s the script enqueued via
+/// `luaml.dispatch(...)`. Dispatches are Rust-side queued — the Lua call only
+/// appends. The engine drains this list after the clause returns cleanly and
+/// feeds each entry into its cascade loop.
+pub(crate) fn execute_clause(
     lua: &Lua,
     clause: &Clause,
     bindings: &FieldBindings,
-    api_bindings: &[ApiBinding],
-) -> Result<(), LuamlError> {
-    // Create a sandboxed environment table.
+    api_bindings: &[ApiBindingEntry],
+) -> Result<Vec<FieldMap>, LuamlError> {
     let env = lua.create_table()?;
     let mt = lua.create_table()?;
     let globals = lua.globals();
-
-    // Metatable lets the env access/set standard globals (print, string, etc.)
     mt.set("__index", globals.clone())?;
     mt.set("__newindex", globals)?;
     env.set_metatable(Some(mt))?;
 
-    // Inject pattern-bound variables.
     for (name, value) in bindings {
         env.set(name.as_str(), field_value_to_lua(lua, value)?)?;
     }
 
-    // Determine which API bindings match this clause's execution policy.
     let policy_as_fieldmap = clause_policy_to_fieldmap(clause);
-    for binding in api_bindings {
-        if binding.pattern.is_empty()
-            || match_fields(&binding.pattern, &policy_as_fieldmap).is_some()
-        {
-            inject_api_namespace(lua, &env, &binding.namespace, binding.handler.clone())?;
+    for entry in api_bindings {
+        let spec = &entry.spec;
+        if spec.pattern.is_empty() || match_fields(&spec.pattern, &policy_as_fieldmap).is_some() {
+            inject_api_namespace(lua, &env, &spec.namespace, spec.handler.clone())?;
         }
     }
 
-    // Execute the Lua body wrapped in an IIFE so `return` exits the inner
-    // function (value discarded) rather than the chunk itself.
+    // Always-on `luaml` namespace. `luaml.dispatch(t)` appends `t` to a
+    // Rust-owned Mutex<Vec<FieldMap>>; the engine drains it after the body
+    // returns and feeds each entry into the cascade loop.
+    let emissions: Arc<Mutex<Vec<FieldMap>>> = Arc::new(Mutex::new(Vec::new()));
+    let luaml_ns = lua.create_table()?;
+    let emissions_ref = emissions.clone();
+    let dispatch_fn = lua.create_function(move |_, t: mlua::Table| -> LuaResult<()> {
+        let fm = lua_table_to_fieldmap(&t)?;
+        emissions_ref.lock().unwrap().push(fm);
+        Ok(())
+    })?;
+    luaml_ns.set("dispatch", dispatch_fn)?;
+    // `luaml.enum(name)` wraps a string as a `FieldValue::Enum` so it can be
+    // written into a dispatch table with enum identity preserved (Lua strings
+    // otherwise become `FieldValue::String`, which would fail to match
+    // `Pattern::Enum(_)` in downstream clauses).
+    let enum_fn = lua.create_function(|_, s: String| Ok(LuaEnum(s)))?;
+    luaml_ns.set("enum", enum_fn)?;
+    env.set("luaml", luaml_ns)?;
+
     let wrapped = format!("(function()\n{}\nend)()", clause.behavior.lua_source);
+
     lua.load(&wrapped).set_environment(env).exec()?;
 
-    Ok(())
+    let out = emissions.lock().unwrap().clone();
+    Ok(out)
+}
+
+/// A Lua userdata that carries an enum value — produced by `luaml.enum(name)`
+/// and recognized by [`lua_value_to_field_value`] so it round-trips as
+/// `FieldValue::Enum` instead of `FieldValue::String`.
+#[derive(Clone, Debug)]
+struct LuaEnum(String);
+impl mlua::UserData for LuaEnum {}
+
+/// Convert a Lua table to a FieldMap, recognizing `LuaEnum` userdata values.
+fn lua_table_to_fieldmap(t: &mlua::Table) -> LuaResult<FieldMap> {
+    let mut map = FieldMap::new();
+    for pair in t.clone().pairs::<String, LuaValue>() {
+        let (k, v) = pair?;
+        map.insert(k, lua_value_to_field_value(&v));
+    }
+    Ok(map)
 }
 
 /// Convert clause execution policy patterns to a FieldMap for API pattern matching.
@@ -185,6 +224,12 @@ pub fn lua_value_to_field_value(value: &LuaValue) -> FieldValue {
         LuaValue::Boolean(b) => FieldValue::Bool(*b),
         LuaValue::Integer(n) => FieldValue::Number(*n),
         LuaValue::Number(f) => FieldValue::Float(*f),
+        LuaValue::UserData(ud) => {
+            if let Ok(e) = ud.borrow::<LuaEnum>() {
+                return FieldValue::Enum(e.0.clone());
+            }
+            FieldValue::Null
+        }
         LuaValue::String(s) => {
             FieldValue::String(s.to_str().map(|s| s.to_string()).unwrap_or_default())
         }
@@ -216,7 +261,7 @@ pub fn lua_value_to_field_value(value: &LuaValue) -> FieldValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{ApiError, ApiHandler};
+    use crate::api::{ApiBindingEntry, ApiBindingSpec, ApiError, ApiHandler};
     use crate::clause::{Behavior, ExecutionPolicy};
     use crate::pattern::Pattern;
     use std::collections::BTreeMap;
@@ -236,6 +281,21 @@ mod tests {
             annotations: Vec::new(),
             field_annotations: BTreeMap::new(),
         }
+    }
+
+    /// Wrap owned specs in binding entries with synthetic ids for tests.
+    fn entries<I>(specs: I) -> Vec<ApiBindingEntry>
+    where
+        I: IntoIterator<Item = ApiBindingSpec>,
+    {
+        specs
+            .into_iter()
+            .enumerate()
+            .map(|(i, spec)| ApiBindingEntry {
+                id: crate::api::ApiBindingId(i as u64),
+                spec,
+            })
+            .collect()
     }
 
     struct MockHandler {
@@ -308,11 +368,11 @@ mod tests {
             "result = client.quit()",
         );
 
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![("surface".into(), Pattern::Enum("tui".into()))],
             handler: handler.clone(),
-        }];
+        }]);
 
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
 
@@ -336,11 +396,11 @@ mod tests {
             "client.move(1, \"up\")",
         );
 
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![],
             handler: handler.clone(),
-        }];
+        }]);
 
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
 
@@ -364,11 +424,11 @@ mod tests {
             "result = client == nil",
         );
 
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![("surface".into(), Pattern::Enum("tui".into()))],
             handler: handler.clone(),
-        }];
+        }]);
 
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
 
@@ -385,11 +445,11 @@ mod tests {
 
         let clause = test_clause(vec![], None, "result = crucible.client.save()");
 
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "crucible.client".into(),
             pattern: vec![],
             handler: handler.clone(),
-        }];
+        }]);
 
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
 
@@ -409,11 +469,11 @@ mod tests {
         let lua = Lua::new();
         let clause = test_clause(vec![], None, "client.explode()");
 
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![],
             handler: Arc::new(FailHandler),
-        }];
+        }]);
 
         let err = execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings);
         assert!(err.is_err());
@@ -630,18 +690,18 @@ result_sub = string.sub('hello', 1, 3)
 
         let clause = test_clause(vec![], None, "r1 = ns_a.method()\nr2 = ns_b.method()");
 
-        let api_bindings = vec![
-            ApiBinding {
+        let api_bindings = entries([
+            ApiBindingSpec {
                 namespace: "ns_a".into(),
                 pattern: vec![],
                 handler: handler1.clone(),
             },
-            ApiBinding {
+            ApiBindingSpec {
                 namespace: "ns_b".into(),
                 pattern: vec![],
                 handler: handler2.clone(),
             },
-        ];
+        ]);
 
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
         let r1: String = lua.globals().get("r1").unwrap();
@@ -657,11 +717,11 @@ result_sub = string.sub('hello', 1, 3)
 
         let clause = test_clause(vec![], None, "result = a.b.c.method()");
 
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "a.b.c".into(),
             pattern: vec![],
             handler: handler.clone(),
-        }];
+        }]);
 
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
         let result: String = lua.globals().get("result").unwrap();
@@ -677,11 +737,11 @@ result_sub = string.sub('hello', 1, 3)
             None,
             "result = client.get_value()\nis_nil = result == nil",
         );
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![],
             handler,
-        }];
+        }]);
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
         let is_nil: bool = lua.globals().get("is_nil").unwrap();
         assert!(is_nil);
@@ -701,11 +761,11 @@ result_sub = string.sub('hello', 1, 3)
 
         let lua = Lua::new();
         let clause = test_clause(vec![], None, "items = client.get_list()\nresult = #items");
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![],
             handler: Arc::new(ListHandler),
-        }];
+        }]);
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
         let len: i64 = lua.globals().get("result").unwrap();
         assert_eq!(len, 2);
@@ -724,11 +784,11 @@ result_sub = string.sub('hello', 1, 3)
 
         let lua = Lua::new();
         let clause = test_clause(vec![], None, "data = client.get_map()\nresult = data.name");
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![],
             handler: Arc::new(MapHandler),
-        }];
+        }]);
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
         let name: String = lua.globals().get("result").unwrap();
         assert_eq!(name, "agent");
@@ -739,11 +799,11 @@ result_sub = string.sub('hello', 1, 3)
         let lua = Lua::new();
         let handler = Arc::new(MockHandler::new(FieldValue::Null));
         let clause = test_clause(vec![], None, "client.ping()");
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![],
             handler: handler.clone(),
-        }];
+        }]);
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
         let calls = handler.call_log();
         assert_eq!(calls.len(), 1);
@@ -755,11 +815,11 @@ result_sub = string.sub('hello', 1, 3)
         let lua = Lua::new();
         let handler = Arc::new(MockHandler::new(FieldValue::Null));
         let clause = test_clause(vec![], None, "client.many(1,2,3,4,5,6,7,8,9,10)");
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![],
             handler: handler.clone(),
-        }];
+        }]);
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
         let calls = handler.call_log();
         assert_eq!(calls[0].2.len(), 10);
@@ -770,11 +830,11 @@ result_sub = string.sub('hello', 1, 3)
         let lua = Lua::new();
         let handler = Arc::new(MockHandler::new(FieldValue::Null));
         let clause = test_clause(vec![], None, "client.first()\nclient.second()");
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![],
             handler: handler.clone(),
-        }];
+        }]);
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
         let calls = handler.call_log();
         assert_eq!(calls.len(), 2);
@@ -787,11 +847,11 @@ result_sub = string.sub('hello', 1, 3)
         let lua = Lua::new();
         let handler = Arc::new(MockHandler::new(FieldValue::Number(42)));
         let clause = test_clause(vec![], None, "n = client.get_number()\nresult = n + 8");
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![],
             handler,
-        }];
+        }]);
         execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
         let result: i64 = lua.globals().get("result").unwrap();
         assert_eq!(result, 50);
@@ -808,11 +868,11 @@ result_sub = string.sub('hello', 1, 3)
 
         let lua = Lua::new();
         let clause = test_clause(vec![], None, "client.fail()");
-        let api_bindings = vec![ApiBinding {
+        let api_bindings = entries([ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![],
             handler: Arc::new(FailHandler),
-        }];
+        }]);
         let err = execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap_err();
         assert!(err.to_string().contains("specific error message"));
     }

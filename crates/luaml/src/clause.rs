@@ -36,5 +36,8 @@ pub struct Clause {
 #[derive(Clone, Debug)]
 pub struct Script {
     pub source_path: PathBuf,
+    /// Extension membership declared via `! name` syntax in frontmatter.
+    /// Script-level metadata — applies to all clauses, never participates in matching.
+    pub extension: Option<String>,
     pub clauses: Vec<Clause>,
 }

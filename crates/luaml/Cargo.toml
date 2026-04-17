@@ -8,6 +8,9 @@ description = "Pattern-matched script engine: YAML execution policies + Lua beha
 [features]
 default = []
 file-watch = ["dep:notify", "dep:notify-debouncer-mini"]
+# Opt-in helpers (EngineBuilder, `event!` macro) for consumer tests. Always on
+# inside luaml's own `cfg(test)`.
+testing = []
 
 [dependencies]
 mlua = { version = "0.11", features = ["lua54", "vendored"] }
@@ -16,3 +19,4 @@ notify-debouncer-mini = { version = "0.5", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+toml = "0.8"

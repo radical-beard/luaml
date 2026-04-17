@@ -1,7 +1,10 @@
 use std::path::Path;
 
+use std::collections::HashMap;
+
 use crate::clause::{Clause, Script};
 use crate::error::LuamlError;
+use crate::extension;
 use crate::guard::evaluate_guard;
 use crate::parser::parse_luaml;
 use crate::pattern::Pattern;
@@ -50,17 +53,95 @@ impl ScriptRegistry {
     }
 
     /// Register all .luaml files under a directory (recursive).
+    ///
+    /// Also discovers `.extension.toml` manifests. If a manifest lists scripts
+    /// that don't exist in the directory, the entire extension is skipped
+    /// (none of its scripts are registered).
     pub fn register_dir(&mut self, dir: &Path) -> Result<usize, LuamlError> {
         let mut count = 0;
         if !dir.is_dir() {
             return Ok(0);
         }
-        for entry in walkdir(dir)? {
-            if entry.extension().is_some_and(|ext| ext == "luaml") {
-                self.register_file(&entry)?;
-                count += 1;
+
+        let all_files = walkdir(dir)?;
+        let luaml_files: Vec<_> = all_files
+            .iter()
+            .filter(|p| p.extension().is_some_and(|ext| ext == "luaml"))
+            .collect();
+        let manifest_files: Vec<_> = all_files
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".extension.toml"))
+            })
+            .collect();
+
+        // Parse manifests and build a set of paths that belong to failed extensions.
+        let mut blocked_paths: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+        let mut extension_scripts: HashMap<String, Vec<std::path::PathBuf>> = HashMap::new();
+
+        for manifest_path in &manifest_files {
+            let text = std::fs::read_to_string(manifest_path)?;
+            let manifest = extension::parse_manifest(&text, manifest_path)?;
+            let manifest_dir = manifest_path.parent().unwrap_or(Path::new("."));
+
+            let mut resolved = Vec::new();
+            let mut all_present = true;
+            for rel_path in &manifest.scripts {
+                let full = manifest_dir.join(rel_path);
+                let canonical = full.canonicalize().unwrap_or(full.clone());
+                if !canonical.exists() {
+                    eprintln!(
+                        "[luaml] extension '{}': missing script '{}', skipping extension",
+                        manifest.name, rel_path
+                    );
+                    all_present = false;
+                    break;
+                }
+                resolved.push(canonical);
+            }
+
+            if all_present {
+                extension_scripts.insert(manifest.name.clone(), resolved);
+            } else {
+                // Block all scripts that declare this extension.
+                // We'll check after parsing each script.
+                blocked_paths.extend(manifest.scripts.iter().map(|rel| {
+                    let full = manifest_dir.join(rel);
+                    full.canonicalize().unwrap_or(full)
+                }));
             }
         }
+
+        for entry in &luaml_files {
+            let canonical = entry.canonicalize().unwrap_or((*entry).clone());
+            if blocked_paths.contains(&canonical) {
+                continue;
+            }
+            self.register_file(entry)?;
+
+            // Verify extension declaration matches manifest.
+            if let Some(script) = self.scripts.last() {
+                if let Some(ext_name) = &script.extension {
+                    if let Some(manifest_paths) = extension_scripts.get(ext_name) {
+                        if !manifest_paths.contains(&canonical) {
+                            return Err(LuamlError::Parse {
+                                message: format!(
+                                    "script declares extension '{}' but is not listed in its manifest",
+                                    ext_name
+                                ),
+                                source_name: entry.display().to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+
+            count += 1;
+        }
+
         Ok(count)
     }
 
@@ -69,25 +150,65 @@ impl ScriptRegistry {
         self.scripts.push(script);
     }
 
-    /// Remove all scripts registered from the given source path.
-    pub fn unregister(&mut self, source_path: &Path) {
+    /// Remove all scripts registered from the given source path. Returns true
+    /// if at least one script was removed.
+    pub fn unregister(&mut self, source_path: &Path) -> bool {
+        let before = self.scripts.len();
         self.scripts.retain(|s| s.source_path != source_path);
+        self.scripts.len() != before
     }
 
-    /// Replace a script: unregister the old version, then re-register from new text.
+    /// Replace a script: unregister the old version, then re-register from new
+    /// text. Returns true if an existing entry was replaced, false if this is
+    /// a fresh registration.
     pub fn replace(
         &mut self,
         source_path: impl Into<std::path::PathBuf>,
         text: &str,
-    ) -> Result<(), LuamlError> {
+    ) -> Result<bool, LuamlError> {
         let path = source_path.into();
-        self.unregister(&path);
-        self.register_text(path, text)
+        let replaced = self.unregister(&path);
+        self.register_text(path, text)?;
+        Ok(replaced)
+    }
+
+    /// Drop every registered script. API bindings and any caller-held state
+    /// are untouched.
+    pub fn clear(&mut self) {
+        self.scripts.clear();
     }
 
     /// All registered scripts.
     pub fn all(&self) -> &[Script] {
         &self.scripts
+    }
+
+    /// Find all scripts belonging to a named extension.
+    pub fn scripts_for_extension(&self, name: &str) -> Vec<&Script> {
+        self.scripts
+            .iter()
+            .filter(|s| s.extension.as_deref() == Some(name))
+            .collect()
+    }
+
+    /// Return distinct extension names across all registered scripts.
+    pub fn extension_names(&self) -> Vec<&str> {
+        let mut names = Vec::new();
+        for script in &self.scripts {
+            if let Some(ext) = &script.extension {
+                if !names.contains(&ext.as_str()) {
+                    names.push(ext.as_str());
+                }
+            }
+        }
+        names
+    }
+
+    /// Check whether any registered script declares the given extension.
+    pub fn has_extension(&self, name: &str) -> bool {
+        self.scripts
+            .iter()
+            .any(|s| s.extension.as_deref() == Some(name))
     }
 
     /// Find all clauses across all scripts that match the given event.
@@ -395,6 +516,7 @@ handle_other()
         let mut reg = ScriptRegistry::new();
         let script = Script {
             source_path: "direct.luaml".into(),
+            extension: None,
             clauses: vec![Clause {
                 policy: ExecutionPolicy { fields: vec![] },
                 guard: None,
@@ -730,7 +852,7 @@ second()
             .unwrap();
         assert_eq!(reg.all().len(), 2);
 
-        reg.unregister(Path::new("a.luaml"));
+        assert!(reg.unregister(Path::new("a.luaml")));
         assert_eq!(reg.all().len(), 1);
         assert_eq!(reg.all()[0].source_path, Path::new("b.luaml"));
     }
@@ -740,7 +862,7 @@ second()
         let mut reg = ScriptRegistry::new();
         reg.register_text("a.luaml", "---\ntype: :input:\n---\na()\n")
             .unwrap();
-        reg.unregister(Path::new("nonexistent.luaml"));
+        assert!(!reg.unregister(Path::new("nonexistent.luaml")));
         assert_eq!(reg.all().len(), 1);
     }
 
@@ -751,8 +873,10 @@ second()
             .unwrap();
         assert_eq!(reg.all()[0].clauses[0].behavior.lua_source, "old()");
 
-        reg.replace("a.luaml", "---\ntype: :input:\n---\nnew()\n")
+        let replaced = reg
+            .replace("a.luaml", "---\ntype: :input:\n---\nnew()\n")
             .unwrap();
+        assert!(replaced);
         assert_eq!(reg.all().len(), 1);
         assert_eq!(reg.all()[0].clauses[0].behavior.lua_source, "new()");
     }
@@ -760,8 +884,10 @@ second()
     #[test]
     fn replace_nonexistent_registers_new() {
         let mut reg = ScriptRegistry::new();
-        reg.replace("new.luaml", "---\ntype: :input:\n---\nfresh()\n")
+        let replaced = reg
+            .replace("new.luaml", "---\ntype: :input:\n---\nfresh()\n")
             .unwrap();
+        assert!(!replaced);
         assert_eq!(reg.all().len(), 1);
         assert_eq!(reg.all()[0].clauses[0].behavior.lua_source, "fresh()");
     }
@@ -774,5 +900,30 @@ second()
         reg.unregister(Path::new("a.luaml"));
         let matches = reg.match_clauses(&event(&[("type", FieldValue::Enum("input".into()))]));
         assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn clear_drops_all_scripts() {
+        let mut reg = ScriptRegistry::new();
+        reg.register_text("a.luaml", "---\ntype: :input:\n---\na()\n")
+            .unwrap();
+        reg.register_text("b.luaml", "---\ntype: :input:\n---\nb()\n")
+            .unwrap();
+        assert_eq!(reg.all().len(), 2);
+
+        reg.clear();
+        assert_eq!(reg.all().len(), 0);
+    }
+
+    #[test]
+    fn clear_leaves_registry_usable() {
+        let mut reg = ScriptRegistry::new();
+        reg.register_text("a.luaml", "---\ntype: :input:\n---\na()\n")
+            .unwrap();
+        reg.clear();
+        reg.register_text("b.luaml", "---\ntype: :input:\n---\nb()\n")
+            .unwrap();
+        assert_eq!(reg.all().len(), 1);
+        assert_eq!(reg.all()[0].source_path, Path::new("b.luaml"));
     }
 }

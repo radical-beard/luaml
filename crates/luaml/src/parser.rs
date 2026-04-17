@@ -46,35 +46,21 @@ pub fn parse_luaml(source_path: impl Into<PathBuf>, text: &str) -> Result<Script
             source_name: source_name.clone(),
         })?;
 
-    let base = parse_frontmatter_block(&all_lines[1..first_close], false)?;
+    // Extract `! extension` declaration from the top of frontmatter.
+    let fm_lines = &all_lines[1..first_close];
+    let (extension, fm_lines) = extract_extension(fm_lines, &source_name)?;
+
+    let base = parse_frontmatter_block(fm_lines, false)?;
 
     // Everything after the first frontmatter close is body + potential multi-clause blocks.
     let rest = &all_lines[first_close + 1..];
     let clause_boundaries = find_clause_boundaries(rest);
 
-    if clause_boundaries.is_empty() {
-        // Single-clause script.
-        let lua_body = rest.join("\n");
-        let clauses = vec![Clause {
-            policy: ExecutionPolicy {
-                fields: base.fields,
-            },
-            guard: base.guard,
-            behavior: Behavior {
-                lua_source: lua_body,
-            },
-            annotations: base.annotations,
-            field_annotations: base.field_annotations,
-        }];
-        return Ok(Script {
-            source_path,
-            clauses,
-        });
-    }
+    let first_body_end = clause_boundaries.first().copied().unwrap_or(rest.len());
+    let first_body = rest[..first_body_end].join("\n");
 
-    // Multi-clause: first clause is the body before the first boundary.
-    let first_body = rest[..clause_boundaries[0]].join("\n");
-    let mut clauses = vec![Clause {
+    let mut clauses = Vec::new();
+    clauses.push(Clause {
         policy: ExecutionPolicy {
             fields: base.fields.clone(),
         },
@@ -84,7 +70,7 @@ pub fn parse_luaml(source_path: impl Into<PathBuf>, text: &str) -> Result<Script
         },
         annotations: base.annotations.clone(),
         field_annotations: base.field_annotations.clone(),
-    }];
+    });
 
     for (i, &boundary_start) in clause_boundaries.iter().enumerate() {
         let fm_start = boundary_start + 1;
@@ -100,39 +86,33 @@ pub fn parse_luaml(source_path: impl Into<PathBuf>, text: &str) -> Result<Script
                 source_name: source_name.clone(),
             })?;
 
-        let child = parse_frontmatter_block(&rest[fm_start..fm_end], true)?;
+        let child_fm_lines = &rest[fm_start..fm_end];
+        let child = parse_frontmatter_block(child_fm_lines, true)?;
 
-        // Merge: child fields override base fields of the same key.
+        let body_end = clause_boundaries.get(i + 1).copied().unwrap_or(rest.len());
+        let body = rest[fm_end + 1..body_end].join("\n");
+
         let merged_fields = merge_fields(&base.fields, &child.fields);
-        // Field annotations: child inherits from base for inherited fields
-        let merged_field_annotations = merge_field_annotations(
+        let merged_fa = merge_field_annotations(
             &base.field_annotations,
             &child.field_annotations,
             &merged_fields,
         );
-        // Guards are per-clause, never inherited from the base.
-        let merged_guard = child.guard;
-        // Top-level annotations are NOT inherited — they describe the script via the first clause.
-        // Child clause gets its own top-level annotations (if any).
-        let child_annotations = child.annotations;
-
-        // Body runs from fm_end+1 to the next boundary (or end of file).
-        let body_end = clause_boundaries.get(i + 1).copied().unwrap_or(rest.len());
-        let body = rest[fm_end + 1..body_end].join("\n");
 
         clauses.push(Clause {
             policy: ExecutionPolicy {
                 fields: merged_fields,
             },
-            guard: merged_guard,
+            guard: child.guard.clone(),
             behavior: Behavior { lua_source: body },
-            annotations: child_annotations,
-            field_annotations: merged_field_annotations,
+            annotations: child.annotations.clone(),
+            field_annotations: merged_fa,
         });
     }
 
     Ok(Script {
         source_path,
+        extension,
         clauses,
     })
 }
@@ -169,6 +149,49 @@ fn merge_field_annotations(
     merged
 }
 
+/// Extract `! extension-name` declaration from the top of frontmatter lines.
+///
+/// Returns `(Some(name), remaining_lines)` if a `!` line is found, or
+/// `(None, all_lines)` if no `!` line is present. Only one `!` line is
+/// allowed, and it must appear before any other content.
+fn extract_extension<'a>(
+    lines: &'a [&'a str],
+    source_name: &str,
+) -> Result<(Option<String>, &'a [&'a str]), LuamlError> {
+    let mut extension: Option<String> = None;
+    let mut consumed = 0;
+
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            consumed += 1;
+            continue;
+        }
+        if let Some(name) = trimmed.strip_prefix('!') {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(LuamlError::Parse {
+                    message: "extension declaration `!` has no name".into(),
+                    source_name: source_name.into(),
+                });
+            }
+            if extension.is_some() {
+                return Err(LuamlError::Parse {
+                    message: "only one extension declaration `!` is allowed per script".into(),
+                    source_name: source_name.into(),
+                });
+            }
+            extension = Some(name.to_string());
+            consumed += 1;
+        } else {
+            // First non-empty, non-`!` line — stop consuming.
+            break;
+        }
+    }
+
+    Ok((extension, &lines[consumed..]))
+}
+
 /// Parsed result from a frontmatter block.
 struct FrontmatterBlock {
     fields: Vec<(String, Pattern)>,
@@ -198,6 +221,15 @@ fn parse_frontmatter_block(lines: &[&str], is_child: bool) -> Result<Frontmatter
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
+        }
+
+        // Extension declarations must be consumed before this function is called.
+        if trimmed.starts_with('!') {
+            return Err(LuamlError::Parse {
+                message: "extension `!` must appear at the top of the first frontmatter block"
+                    .into(),
+                source_name: "frontmatter".into(),
+            });
         }
 
         // Annotation lines: `@key: value`
@@ -1153,4 +1185,75 @@ handle()
         let script = parse_luaml("ann_fm.luaml", input).unwrap();
         assert_eq!(script.clauses.len(), 2);
     }
+
+    // ── Extension `!` syntax ──────────────────────────────────────
+
+    #[test]
+    fn extension_declaration_sets_script_extension() {
+        let input = "---\n! my-ext\ntype: :provider:\nprovider: \"test\"\n---\nprint('hello')\n";
+        let script = parse_luaml("ext.luaml", input).unwrap();
+        assert_eq!(script.extension, Some("my-ext".into()));
+        assert_eq!(script.clauses.len(), 1);
+        // Extension line is NOT a pattern field
+        assert_eq!(script.clauses[0].policy.fields.len(), 2);
+    }
+
+    #[test]
+    fn no_extension_declaration() {
+        let input = "---\ntype: :input:\nkey: \"q\"\n---\nprint('hello')\n";
+        let script = parse_luaml("no-ext.luaml", input).unwrap();
+        assert_eq!(script.extension, None);
+    }
+
+    #[test]
+    fn extension_with_leading_blank_lines() {
+        let input = "---\n\n! my-ext\ntype: :tool:\n---\nprint('hello')\n";
+        let script = parse_luaml("ext-blank.luaml", input).unwrap();
+        assert_eq!(script.extension, Some("my-ext".into()));
+    }
+
+    #[test]
+    fn extension_error_empty_name() {
+        let input = "---\n!\ntype: :tool:\n---\nprint('hello')\n";
+        let result = parse_luaml("ext-empty.luaml", input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no name"),
+            "expected 'no name' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn extension_error_duplicate() {
+        let input = "---\n! first\n! second\ntype: :tool:\n---\nprint('hello')\n";
+        let result = parse_luaml("ext-dup.luaml", input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("only one"),
+            "expected 'only one' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn extension_error_after_field() {
+        let input = "---\ntype: :tool:\n! my-ext\nname: \"test\"\n---\nprint('hello')\n";
+        let result = parse_luaml("ext-after.luaml", input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("top of the first"),
+            "expected position error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn extension_not_in_child_clause() {
+        let input = "---\n! my-ext\ntype: :input:\nkey: \"a\"\n---\nprint('a')\n---\nkey: \"b\"\n---\nprint('b')\n";
+        let script = parse_luaml("ext-child.luaml", input).unwrap();
+        assert_eq!(script.extension, Some("my-ext".into()));
+        assert_eq!(script.clauses.len(), 2);
+    }
+
 }

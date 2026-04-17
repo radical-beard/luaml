@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use luaml::LuamlEngine;
-use luaml::api::{ApiBinding, ApiError, ApiHandler};
+use luaml::api::{ApiBindingSpec, ApiError, ApiHandler};
 use luaml::pattern::Pattern;
 use luaml::types::{FieldMap, FieldValue};
 
@@ -62,8 +62,7 @@ fn end_to_end_simple_dispatch() {
         .dispatch(&event(&[
             ("type", FieldValue::Enum("input".into())),
             ("key", FieldValue::String("q".into())),
-        ]))
-        .unwrap();
+        ]));
 
     assert_eq!(results.len(), 1);
     assert!(engine.lua().globals().get::<bool>("quit_called").unwrap());
@@ -85,8 +84,7 @@ fn end_to_end_variable_binding_flow() {
         .dispatch(&event(&[
             ("type", FieldValue::Enum("lifecycle".into())),
             ("depth", FieldValue::Number(5)),
-        ]))
-        .unwrap();
+        ]));
     assert_eq!(results.len(), 1);
     let val: i64 = engine.lua().globals().get("captured_depth").unwrap();
     assert_eq!(val, 5);
@@ -121,8 +119,7 @@ matched = \"other\"
         .dispatch(&event(&[
             ("type", FieldValue::Enum("input".into())),
             ("key", FieldValue::Enum("escape".into())),
-        ]))
-        .unwrap();
+        ]));
     assert_eq!(
         engine.lua().globals().get::<String>("matched").unwrap(),
         "escape"
@@ -133,8 +130,7 @@ matched = \"other\"
         .dispatch(&event(&[
             ("type", FieldValue::Enum("input".into())),
             ("key", FieldValue::Enum("tab".into())),
-        ]))
-        .unwrap();
+        ]));
     assert_eq!(
         engine.lua().globals().get::<String>("matched").unwrap(),
         "tab"
@@ -145,8 +141,7 @@ matched = \"other\"
         .dispatch(&event(&[
             ("type", FieldValue::Enum("input".into())),
             ("key", FieldValue::Enum("enter".into())),
-        ]))
-        .unwrap();
+        ]));
     assert_eq!(
         engine.lua().globals().get::<String>("matched").unwrap(),
         "other"
@@ -180,8 +175,7 @@ result = \"shallow\"
         .dispatch(&event(&[
             ("type", FieldValue::Enum("lifecycle".into())),
             ("depth", FieldValue::Number(1)),
-        ]))
-        .unwrap();
+        ]));
     assert_eq!(
         engine.lua().globals().get::<String>("result").unwrap(),
         "shallow"
@@ -192,8 +186,7 @@ result = \"shallow\"
         .dispatch(&event(&[
             ("type", FieldValue::Enum("lifecycle".into())),
             ("depth", FieldValue::Number(5)),
-        ]))
-        .unwrap();
+        ]));
     assert_eq!(
         engine.lua().globals().get::<String>("result").unwrap(),
         "deep"
@@ -212,7 +205,7 @@ fn end_to_end_api_callback_flow() {
         )
         .unwrap();
 
-    engine.register_api(ApiBinding {
+    engine.register_api(ApiBindingSpec {
         namespace: "client".into(),
         pattern: vec![("surface".into(), Pattern::Enum("tui".into()))],
         handler: handler.clone(),
@@ -223,8 +216,7 @@ fn end_to_end_api_callback_flow() {
             ("type", FieldValue::Enum("input".into())),
             ("surface", FieldValue::Enum("tui".into())),
             ("key", FieldValue::String("s".into())),
-        ]))
-        .unwrap();
+        ]));
 
     assert_eq!(results.len(), 1);
 
@@ -269,7 +261,7 @@ fn end_to_end_multiple_scripts_with_api() {
         )
         .unwrap();
 
-    engine.register_api(ApiBinding {
+    engine.register_api(ApiBindingSpec {
         namespace: "svc".into(),
         pattern: vec![("surface".into(), Pattern::Enum("tui".into()))],
         handler: handler.clone(),
@@ -279,8 +271,7 @@ fn end_to_end_multiple_scripts_with_api() {
         .dispatch(&event(&[
             ("type", FieldValue::Enum("input".into())),
             ("surface", FieldValue::Enum("tui".into())),
-        ]))
-        .unwrap();
+        ]));
 
     // Only a and b match (surface: :tui:), c has surface: :runner:
     assert_eq!(results.len(), 2);
@@ -309,8 +300,7 @@ fn end_to_end_map_destructuring_to_lua() {
         .dispatch(&event(&[
             ("type", FieldValue::Enum("lifecycle".into())),
             ("context", FieldValue::Map(ctx)),
-        ]))
-        .unwrap();
+        ]));
 
     assert_eq!(results.len(), 1);
     let val: i64 = engine.lua().globals().get("captured").unwrap();
@@ -338,8 +328,7 @@ fn end_to_end_list_destructuring_to_lua() {
                     FieldValue::String("gamma".into()),
                 ]),
             ),
-        ]))
-        .unwrap();
+        ]));
 
     assert_eq!(results.len(), 1);
     let first: String = engine.lua().globals().get("captured_first").unwrap();
@@ -364,8 +353,7 @@ fn end_to_end_type_distinction_preserved() {
         .dispatch(&event(&[
             ("type", FieldValue::Enum("input".into())),
             ("surface", FieldValue::Enum("tui".into())),
-        ]))
-        .unwrap();
+        ]));
     assert_eq!(results.len(), 1);
 
     // String "tui" does NOT match Enum :tui:
@@ -373,22 +361,23 @@ fn end_to_end_type_distinction_preserved() {
         .dispatch(&event(&[
             ("type", FieldValue::Enum("input".into())),
             ("surface", FieldValue::String("tui".into())),
-        ]))
-        .unwrap();
+        ]));
     assert_eq!(results.len(), 0);
 }
 
 #[test]
-fn end_to_end_lua_error_returns_error() {
+fn end_to_end_lua_error_surfaces_in_outcome() {
     let mut engine = LuamlEngine::new().unwrap();
     engine
         .register("err.luaml", "---\ntype: :input:\n---\nerror(\"boom\")\n")
         .unwrap();
 
-    let err = engine
-        .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]))
-        .unwrap_err();
-    assert!(err.to_string().contains("boom"));
+    let outcomes =
+        engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+    assert_eq!(outcomes.len(), 1);
+    let err = outcomes[0].result.as_ref().unwrap_err();
+    assert_eq!(err.kind, luaml::ClauseErrKind::Body);
+    assert!(err.message.contains("boom"));
 }
 
 #[test]
@@ -399,8 +388,7 @@ fn end_to_end_empty_body_no_op() {
         .unwrap();
 
     let results = engine
-        .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]))
-        .unwrap();
+        .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
     assert_eq!(results.len(), 1);
 }
 
@@ -416,7 +404,7 @@ fn end_to_end_nested_namespace_api() {
         )
         .unwrap();
 
-    engine.register_api(ApiBinding {
+    engine.register_api(ApiBindingSpec {
         namespace: "a.b".into(),
         pattern: vec![("surface".into(), Pattern::Enum("tui".into()))],
         handler: handler.clone(),
@@ -426,8 +414,7 @@ fn end_to_end_nested_namespace_api() {
         .dispatch(&event(&[
             ("type", FieldValue::Enum("input".into())),
             ("surface", FieldValue::Enum("tui".into())),
-        ]))
-        .unwrap();
+        ]));
 
     assert_eq!(results.len(), 1);
     let calls = handler.call_log();
@@ -467,15 +454,13 @@ fn end_to_end_register_dir() {
         .dispatch(&event(&[
             ("type", FieldValue::Enum("input".into())),
             ("key", FieldValue::String("q".into())),
-        ]))
-        .unwrap();
+        ]));
     assert_eq!(results.len(), 1);
     assert!(engine.lua().globals().get::<bool>("keys_matched").unwrap());
 
     // Dispatch lifecycle event
     let results = engine
-        .dispatch(&event(&[("type", FieldValue::Enum("lifecycle".into()))]))
-        .unwrap();
+        .dispatch(&event(&[("type", FieldValue::Enum("lifecycle".into()))]));
     assert_eq!(results.len(), 1);
     assert!(
         engine

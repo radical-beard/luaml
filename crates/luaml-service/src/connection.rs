@@ -3,7 +3,7 @@ use std::net::TcpStream;
 use std::sync::Arc;
 
 use luaml::LuamlEngine;
-use luaml::api::ApiBinding;
+use luaml::api::ApiBindingSpec;
 use luaml::pattern::Pattern;
 use luaml::types::FieldValue;
 
@@ -128,7 +128,7 @@ fn handle_register_api(
         Err(e) => return Response::err(request.id, INVALID_PARAMS, e),
     };
 
-    engine.register_api(ApiBinding {
+    engine.register_api(ApiBindingSpec {
         namespace: params.namespace,
         pattern,
         handler: handler.clone(),
@@ -137,7 +137,7 @@ fn handle_register_api(
     Response::ok(request.id, serde_json::json!({"ok": true}))
 }
 
-fn handle_dispatch(engine: &LuamlEngine, request: &Request) -> Response {
+fn handle_dispatch(engine: &mut LuamlEngine, request: &Request) -> Response {
     let params: DispatchParams = match serde_json::from_value(request.params.clone()) {
         Ok(p) => p,
         Err(e) => return Response::err(request.id, INVALID_PARAMS, e.to_string()),
@@ -149,23 +149,19 @@ fn handle_dispatch(engine: &LuamlEngine, request: &Request) -> Response {
         Err(e) => return Response::err(request.id, INVALID_PARAMS, e),
     };
 
-    match engine.dispatch(&event) {
-        Ok(results) => {
-            let matches: Vec<DispatchMatch> = results
-                .iter()
-                .map(|r| DispatchMatch {
-                    script_path: r.script_path.display().to_string(),
-                    bindings: r.bindings.clone(),
-                })
-                .collect();
-            let result = DispatchResult { matches };
-            Response::ok(
-                request.id,
-                serde_json::to_value(&result).unwrap_or(serde_json::json!(null)),
-            )
-        }
-        Err(e) => Response::err(request.id, LUAML_ERROR, e.to_string()),
-    }
+    let results = engine.dispatch(&event);
+    let matches: Vec<DispatchMatch> = results
+        .iter()
+        .map(|r| DispatchMatch {
+            script_path: r.script_path.display().to_string(),
+            bindings: r.bindings.clone(),
+        })
+        .collect();
+    let result = DispatchResult { matches };
+    Response::ok(
+        request.id,
+        serde_json::to_value(&result).unwrap_or(serde_json::json!(null)),
+    )
 }
 
 fn handle_query(engine: &LuamlEngine, request: &Request) -> Response {

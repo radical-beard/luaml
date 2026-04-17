@@ -32,15 +32,29 @@ pub trait ApiHandler: Send + Sync {
     ) -> Result<FieldValue, ApiError>;
 }
 
-/// Binds a namespace to a handler, scoped by pattern match against clause execution policy.
+/// Caller-facing declaration of an API namespace binding.
 ///
-/// When the engine executes a clause, it checks each ApiBinding's pattern against the
-/// clause's execution policy fields. If the pattern matches, the namespace is injected
-/// into the Lua environment as a table with proxy functions.
-pub struct ApiBinding {
+/// Binds a namespace to a handler, scoped by pattern match against clause
+/// execution policy. When the engine executes a clause, it checks each
+/// binding's pattern against the clause's execution policy fields; if the
+/// pattern matches, the namespace is injected into the Lua environment as a
+/// table with proxy functions.
+pub struct ApiBindingSpec {
     pub namespace: String,
     pub pattern: Vec<(String, Pattern)>,
     pub handler: Arc<dyn ApiHandler>,
+}
+
+/// Opaque handle returned by [`crate::LuamlEngine::register_api`]. Use it with
+/// [`crate::LuamlEngine::unregister_api`] / [`crate::LuamlEngine::replace_api`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ApiBindingId(pub(crate) u64);
+
+/// Internal storage: pairs an id with its spec so handlers can be removed or
+/// hot-swapped. Crate-private — consumers only see the id and the spec.
+pub(crate) struct ApiBindingEntry {
+    pub(crate) id: ApiBindingId,
+    pub(crate) spec: ApiBindingSpec,
 }
 
 #[cfg(test)]
@@ -61,7 +75,7 @@ mod tests {
     }
 
     #[test]
-    fn api_binding_with_empty_pattern() {
+    fn api_binding_spec_with_empty_pattern() {
         struct DummyHandler;
         impl ApiHandler for DummyHandler {
             fn call(&self, _: &str, _: &str, _: Vec<FieldValue>) -> Result<FieldValue, ApiError> {
@@ -69,17 +83,17 @@ mod tests {
             }
         }
 
-        let binding = ApiBinding {
+        let spec = ApiBindingSpec {
             namespace: "test".into(),
             pattern: vec![],
             handler: Arc::new(DummyHandler),
         };
-        assert_eq!(binding.namespace, "test");
-        assert!(binding.pattern.is_empty());
+        assert_eq!(spec.namespace, "test");
+        assert!(spec.pattern.is_empty());
     }
 
     #[test]
-    fn api_binding_with_pattern() {
+    fn api_binding_spec_with_pattern() {
         struct DummyHandler;
         impl ApiHandler for DummyHandler {
             fn call(&self, _: &str, _: &str, _: Vec<FieldValue>) -> Result<FieldValue, ApiError> {
@@ -87,12 +101,12 @@ mod tests {
             }
         }
 
-        let binding = ApiBinding {
+        let spec = ApiBindingSpec {
             namespace: "client".into(),
             pattern: vec![("surface".into(), Pattern::Enum("tui".into()))],
             handler: Arc::new(DummyHandler),
         };
-        assert_eq!(binding.namespace, "client");
-        assert_eq!(binding.pattern.len(), 1);
+        assert_eq!(spec.namespace, "client");
+        assert_eq!(spec.pattern.len(), 1);
     }
 }
