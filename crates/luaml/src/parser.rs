@@ -1255,5 +1255,4 @@ handle()
         assert_eq!(script.extension, Some("my-ext".into()));
         assert_eq!(script.clauses.len(), 2);
     }
-
 }

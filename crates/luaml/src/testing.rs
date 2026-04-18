@@ -10,11 +10,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::LuamlEngine;
 use crate::api::{ApiBindingSpec, ApiHandler};
 use crate::error::LuamlError;
 use crate::pattern::Pattern;
 use crate::types::{FieldMap, FieldValue};
-use crate::LuamlEngine;
 
 /// Fluent builder for a pre-configured [`LuamlEngine`]. Reduces boilerplate in
 /// consumer tests that used to call `LuamlEngine::new`, then `register`, then
@@ -39,21 +39,13 @@ impl EngineBuilder {
     }
 
     /// Queue a script to be registered when the engine is built.
-    pub fn with_script(
-        mut self,
-        path: impl Into<PathBuf>,
-        text: impl Into<String>,
-    ) -> Self {
+    pub fn with_script(mut self, path: impl Into<PathBuf>, text: impl Into<String>) -> Self {
         self.scripts.push((path.into(), text.into()));
         self
     }
 
     /// Queue an API binding with an empty pattern (matches every clause).
-    pub fn with_api(
-        self,
-        namespace: impl Into<String>,
-        handler: Arc<dyn ApiHandler>,
-    ) -> Self {
+    pub fn with_api(self, namespace: impl Into<String>, handler: Arc<dyn ApiHandler>) -> Self {
         self.with_api_pattern(namespace, Vec::new(), handler)
     }
 

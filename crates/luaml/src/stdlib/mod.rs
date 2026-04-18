@@ -5,15 +5,32 @@
 //! [`LuamlStdlibModule`], provides a bare namespace name (e.g. `"http"`,
 //! `"json"`, `"fs"`), and returns the table to be assigned to that global.
 //!
-//! This module only contains the wiring — the trait, the `install_all` entry
-//! point called from `LuamlEngine::with_lua`, and the [`promise::Promise`]
-//! userdata used by async stdlib ops. Concrete modules are added behind
-//! `stdlib-<name>` feature flags as they land.
+//! This module contains the wiring — the trait, the `install_all` entry
+//! point called from `LuamlEngine::with_lua`, the [`promise::Promise`]
+//! userdata used by async stdlib ops, and the list of compiled-in modules.
 
 use mlua::Lua;
 use tokio::runtime::Handle;
 
+pub mod codec;
+pub mod console;
+pub mod crypto;
+pub mod env;
+pub mod fs;
+pub mod http;
+pub mod json;
+pub mod math;
+pub mod path;
+pub mod process;
 pub mod promise;
+pub mod regex;
+pub mod rpc;
+pub mod tcp;
+pub mod thread;
+pub mod time;
+pub mod udp;
+pub mod url;
+pub mod vec;
 
 /// Trait implemented by each stdlib module. Each module owns a single bare
 /// namespace in the Lua globals and produces the table installed under that
@@ -32,8 +49,7 @@ pub trait LuamlStdlibModule: Send + Sync {
 
 /// Install every compiled-in stdlib module into the Lua globals as bare
 /// namespaces. Called by [`crate::LuamlEngine::with_lua`] after the rest of
-/// engine state has been prepared. No module is installed unless its
-/// `stdlib-<name>` feature is enabled.
+/// engine state has been prepared.
 pub(crate) fn install_all(lua: &Lua, rt: &Handle) -> mlua::Result<()> {
     let modules = collect_modules();
     let globals = lua.globals();
@@ -44,15 +60,30 @@ pub(crate) fn install_all(lua: &Lua, rt: &Handle) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Aggregate every compiled-in stdlib module. Modules register themselves by
-/// being appended here behind their respective `stdlib-<name>` feature flags;
-/// the list is empty by default until the first module lands.
+/// Aggregate every compiled-in stdlib module. `math` installs last because it
+/// extends (not replaces) Lua's built-in `math` global — its `install` reads
+/// the existing `math` table and augments it with additional functions.
 fn collect_modules() -> Vec<Box<dyn LuamlStdlibModule>> {
-    // Intentionally empty: L9–L26 modules will append to this list under
-    // their own `stdlib-<name>` feature flags. Keep the explicit type so the
-    // empty case type-checks even when every feature is disabled.
-    let modules: Vec<Box<dyn LuamlStdlibModule>> = Vec::new();
-    modules
+    vec![
+        Box::new(codec::CodecModule),
+        Box::new(console::ConsoleModule),
+        Box::new(crypto::CryptoModule),
+        Box::new(env::EnvModule),
+        Box::new(fs::FsModule),
+        Box::new(http::HttpModule),
+        Box::new(json::JsonModule),
+        Box::new(path::PathModule),
+        Box::new(process::ProcessModule),
+        Box::new(regex::RegexModule),
+        Box::new(rpc::RpcModule),
+        Box::new(tcp::TcpModule),
+        Box::new(thread::ThreadModule),
+        Box::new(time::TimeModule),
+        Box::new(udp::UdpModule),
+        Box::new(url::UrlModule),
+        Box::new(vec::VecModule),
+        Box::new(math::MathModule),
+    ]
 }
 
 #[cfg(test)]
@@ -61,9 +92,6 @@ mod tests {
 
     #[test]
     fn engine_constructs_with_stdlib_infra() {
-        // stdlib has no modules yet, so no globals are injected. What we're
-        // testing is that construction succeeds with the tokio runtime
-        // plumbed through — a broken wiring would panic or error here.
         let engine = LuamlEngine::new().expect("engine should build");
         let _ = engine.rt_handle();
     }
@@ -77,18 +105,18 @@ mod tests {
     }
 
     #[test]
-    fn install_all_is_a_noop_until_modules_land() {
-        // Sanity: no stdlib modules currently register, so no globals beyond
-        // what the Lua VM ships with are installed by the engine. The
-        // explicit names below are the bare namespaces L9+ modules claim; if
-        // any accidentally ship enabled-by-default, this test fails first.
+    fn all_stdlib_namespaces_installed() {
         let engine = LuamlEngine::new().expect("engine should build");
         let globals = engine.lua().globals();
-        for name in ["http", "fs", "json", "crypto", "process", "net"] {
+        for name in [
+            "codec", "console", "crypto", "env", "fs", "http", "json", "path",
+            "process", "regex", "rpc", "tcp", "thread", "time", "udp", "url",
+            "vec",
+        ] {
             let val: mlua::Value = globals.get(name).unwrap_or(mlua::Value::Nil);
             assert!(
-                matches!(val, mlua::Value::Nil),
-                "unexpected global {name:?} installed without feature flag"
+                !matches!(val, mlua::Value::Nil),
+                "stdlib namespace {name:?} missing from globals"
             );
         }
     }

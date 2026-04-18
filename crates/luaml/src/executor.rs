@@ -910,7 +910,8 @@ result_sub = string.sub('hello', 1, 3)
             pattern: vec![],
             handler: Arc::new(FailHandler),
         }]);
-        let err = execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap_err();
+        let err =
+            execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap_err();
         assert!(err.to_string().contains("specific error message"));
     }
 

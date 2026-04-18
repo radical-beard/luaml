@@ -32,10 +32,7 @@ pub(crate) struct ScriptWatcher {
 
 impl ScriptWatcher {
     /// Start watching the given directories for `.luaml` file changes.
-    pub(crate) fn new(
-        dirs: &[&Path],
-        debounce: std::time::Duration,
-    ) -> Result<Self, LuamlError> {
+    pub(crate) fn new(dirs: &[&Path], debounce: std::time::Duration) -> Result<Self, LuamlError> {
         let (tx, rx) = mpsc::channel();
 
         let mut debouncer = new_debouncer(
@@ -83,30 +80,21 @@ impl ScriptWatcher {
     /// Drain pending changes and apply each one to the registry. Parse errors
     /// from a single changed file are logged to stderr but do not stop other
     /// changes from applying. Returns the paths that were touched.
-    pub(crate) fn apply_pending(
-        &self,
-        registry: &mut ScriptRegistry,
-    ) -> Vec<PathBuf> {
+    pub(crate) fn apply_pending(&self, registry: &mut ScriptRegistry) -> Vec<PathBuf> {
         let mut changed = Vec::new();
 
         while let Ok(batch) = self.rx.try_recv() {
             for change in batch {
                 match change {
-                    FileChange::CreateOrModify(path) => {
-                        match std::fs::read_to_string(&path) {
-                            Ok(text) => match registry.replace(&path, &text) {
-                                Ok(_) => changed.push(path),
-                                Err(e) => eprintln!(
-                                    "[luaml] failed to reload '{}': {e}",
-                                    path.display()
-                                ),
-                            },
-                            Err(e) => eprintln!(
-                                "[luaml] failed to read '{}': {e}",
-                                path.display()
-                            ),
-                        }
-                    }
+                    FileChange::CreateOrModify(path) => match std::fs::read_to_string(&path) {
+                        Ok(text) => match registry.replace(&path, &text) {
+                            Ok(_) => changed.push(path),
+                            Err(e) => {
+                                eprintln!("[luaml] failed to reload '{}': {e}", path.display())
+                            }
+                        },
+                        Err(e) => eprintln!("[luaml] failed to read '{}': {e}", path.display()),
+                    },
                     FileChange::Remove(path) => {
                         let _ = registry.unregister(&path);
                         changed.push(path);

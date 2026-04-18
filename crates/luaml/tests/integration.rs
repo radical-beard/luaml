@@ -58,11 +58,10 @@ fn end_to_end_simple_dispatch() {
         )
         .unwrap();
 
-    let results = engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("input".into())),
-            ("key", FieldValue::String("q".into())),
-        ]));
+    let results = engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("input".into())),
+        ("key", FieldValue::String("q".into())),
+    ]));
 
     assert_eq!(results.len(), 1);
     assert!(engine.lua().globals().get::<bool>("quit_called").unwrap());
@@ -80,11 +79,10 @@ fn end_to_end_variable_binding_flow() {
         .unwrap();
 
     // d=5 passes guard
-    let results = engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("lifecycle".into())),
-            ("depth", FieldValue::Number(5)),
-        ]));
+    let results = engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("lifecycle".into())),
+        ("depth", FieldValue::Number(5)),
+    ]));
     assert_eq!(results.len(), 1);
     let val: i64 = engine.lua().globals().get("captured_depth").unwrap();
     assert_eq!(val, 5);
@@ -115,33 +113,30 @@ matched = \"other\"
         .unwrap();
 
     // escape → first clause
-    engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("input".into())),
-            ("key", FieldValue::Enum("escape".into())),
-        ]));
+    engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("input".into())),
+        ("key", FieldValue::Enum("escape".into())),
+    ]));
     assert_eq!(
         engine.lua().globals().get::<String>("matched").unwrap(),
         "escape"
     );
 
     // tab → second clause
-    engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("input".into())),
-            ("key", FieldValue::Enum("tab".into())),
-        ]));
+    engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("input".into())),
+        ("key", FieldValue::Enum("tab".into())),
+    ]));
     assert_eq!(
         engine.lua().globals().get::<String>("matched").unwrap(),
         "tab"
     );
 
     // anything else → wildcard clause
-    engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("input".into())),
-            ("key", FieldValue::Enum("enter".into())),
-        ]));
+    engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("input".into())),
+        ("key", FieldValue::Enum("enter".into())),
+    ]));
     assert_eq!(
         engine.lua().globals().get::<String>("matched").unwrap(),
         "other"
@@ -171,22 +166,20 @@ result = \"shallow\"
         .unwrap();
 
     // d=1 fails first guard, falls to second clause
-    engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("lifecycle".into())),
-            ("depth", FieldValue::Number(1)),
-        ]));
+    engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("lifecycle".into())),
+        ("depth", FieldValue::Number(1)),
+    ]));
     assert_eq!(
         engine.lua().globals().get::<String>("result").unwrap(),
         "shallow"
     );
 
     // d=5 passes first guard
-    engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("lifecycle".into())),
-            ("depth", FieldValue::Number(5)),
-        ]));
+    engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("lifecycle".into())),
+        ("depth", FieldValue::Number(5)),
+    ]));
     assert_eq!(
         engine.lua().globals().get::<String>("result").unwrap(),
         "deep"
@@ -211,12 +204,11 @@ fn end_to_end_api_callback_flow() {
         handler: handler.clone(),
     });
 
-    let results = engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("input".into())),
-            ("surface", FieldValue::Enum("tui".into())),
-            ("key", FieldValue::String("s".into())),
-        ]));
+    let results = engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("input".into())),
+        ("surface", FieldValue::Enum("tui".into())),
+        ("key", FieldValue::String("s".into())),
+    ]));
 
     assert_eq!(results.len(), 1);
 
@@ -267,11 +259,10 @@ fn end_to_end_multiple_scripts_with_api() {
         handler: handler.clone(),
     });
 
-    let results = engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("input".into())),
-            ("surface", FieldValue::Enum("tui".into())),
-        ]));
+    let results = engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("input".into())),
+        ("surface", FieldValue::Enum("tui".into())),
+    ]));
 
     // Only a and b match (surface: :tui:), c has surface: :runner:
     assert_eq!(results.len(), 2);
@@ -296,11 +287,10 @@ fn end_to_end_map_destructuring_to_lua() {
     ctx.insert("phase".into(), FieldValue::Enum("planning".into()));
     ctx.insert("depth".into(), FieldValue::Number(3));
 
-    let results = engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("lifecycle".into())),
-            ("context", FieldValue::Map(ctx)),
-        ]));
+    let results = engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("lifecycle".into())),
+        ("context", FieldValue::Map(ctx)),
+    ]));
 
     assert_eq!(results.len(), 1);
     let val: i64 = engine.lua().globals().get("captured").unwrap();
@@ -317,18 +307,17 @@ fn end_to_end_list_destructuring_to_lua() {
         )
         .unwrap();
 
-    let results = engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("data".into())),
-            (
-                "items",
-                FieldValue::List(vec![
-                    FieldValue::String("alpha".into()),
-                    FieldValue::String("beta".into()),
-                    FieldValue::String("gamma".into()),
-                ]),
-            ),
-        ]));
+    let results = engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("data".into())),
+        (
+            "items",
+            FieldValue::List(vec![
+                FieldValue::String("alpha".into()),
+                FieldValue::String("beta".into()),
+                FieldValue::String("gamma".into()),
+            ]),
+        ),
+    ]));
 
     assert_eq!(results.len(), 1);
     let first: String = engine.lua().globals().get("captured_first").unwrap();
@@ -349,19 +338,17 @@ fn end_to_end_type_distinction_preserved() {
         .unwrap();
 
     // Enum event matches
-    let results = engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("input".into())),
-            ("surface", FieldValue::Enum("tui".into())),
-        ]));
+    let results = engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("input".into())),
+        ("surface", FieldValue::Enum("tui".into())),
+    ]));
     assert_eq!(results.len(), 1);
 
     // String "tui" does NOT match Enum :tui:
-    let results = engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("input".into())),
-            ("surface", FieldValue::String("tui".into())),
-        ]));
+    let results = engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("input".into())),
+        ("surface", FieldValue::String("tui".into())),
+    ]));
     assert_eq!(results.len(), 0);
 }
 
@@ -372,8 +359,7 @@ fn end_to_end_lua_error_surfaces_in_outcome() {
         .register("err.luaml", "---\ntype: :input:\n---\nerror(\"boom\")\n")
         .unwrap();
 
-    let outcomes =
-        engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+    let outcomes = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
     assert_eq!(outcomes.len(), 1);
     let err = outcomes[0].result.as_ref().unwrap_err();
     assert_eq!(err.kind, luaml::ClauseErrKind::Body);
@@ -387,8 +373,7 @@ fn end_to_end_empty_body_no_op() {
         .register("empty.luaml", "---\ntype: :input:\n---\n")
         .unwrap();
 
-    let results = engine
-        .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+    let results = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
     assert_eq!(results.len(), 1);
 }
 
@@ -410,11 +395,10 @@ fn end_to_end_nested_namespace_api() {
         handler: handler.clone(),
     });
 
-    let results = engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("input".into())),
-            ("surface", FieldValue::Enum("tui".into())),
-        ]));
+    let results = engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("input".into())),
+        ("surface", FieldValue::Enum("tui".into())),
+    ]));
 
     assert_eq!(results.len(), 1);
     let calls = handler.call_log();
@@ -450,17 +434,15 @@ fn end_to_end_register_dir() {
     assert_eq!(count, 2);
 
     // Dispatch input event
-    let results = engine
-        .dispatch(&event(&[
-            ("type", FieldValue::Enum("input".into())),
-            ("key", FieldValue::String("q".into())),
-        ]));
+    let results = engine.dispatch(&event(&[
+        ("type", FieldValue::Enum("input".into())),
+        ("key", FieldValue::String("q".into())),
+    ]));
     assert_eq!(results.len(), 1);
     assert!(engine.lua().globals().get::<bool>("keys_matched").unwrap());
 
     // Dispatch lifecycle event
-    let results = engine
-        .dispatch(&event(&[("type", FieldValue::Enum("lifecycle".into()))]));
+    let results = engine.dispatch(&event(&[("type", FieldValue::Enum("lifecycle".into()))]));
     assert_eq!(results.len(), 1);
     assert!(
         engine
