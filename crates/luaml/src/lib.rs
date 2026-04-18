@@ -142,12 +142,21 @@ pub struct LuamlEngine {
 
 impl LuamlEngine {
     pub fn new() -> Result<Self, LuamlError> {
+        Self::with_lua(Lua::new())
+    }
+
+    /// Construct an engine that adopts an existing [`Lua`] VM. Library-mode
+    /// consumers (e.g. crucible's per-agent runtime) that pre-build namespace
+    /// tables against their own Lua hand that Lua over so engine dispatch and
+    /// consumer-held table handles share one VM — the only way to install a
+    /// pre-built table into a clause environment without cross-VM copies.
+    pub fn with_lua(lua: Lua) -> Result<Self, LuamlError> {
         Ok(Self {
             registry: ScriptRegistry::new(),
             api_bindings: Vec::new(),
             local_api_bindings: Vec::new(),
             next_api_id: 0,
-            lua: Lua::new(),
+            lua,
             roots: Vec::new(),
             cascade_config: CascadeConfig::default(),
             dispatches: Cell::new(0),
