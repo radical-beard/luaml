@@ -8,17 +8,22 @@ pub mod parser;
 pub mod pattern;
 pub mod pattern_match;
 pub mod registry;
+pub mod stdlib;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod types;
 #[cfg(feature = "file-watch")]
 mod watcher;
 
+pub use stdlib::promise::Promise;
+
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use mlua::Lua;
+use tokio::runtime::{Builder, Runtime};
 
 use api::{
     ApiBindingEntry, ApiBindingId, ApiBindingSpec, LocalApiBindingEntry, LocalApiBindingSpec,
@@ -136,6 +141,11 @@ pub struct LuamlEngine {
     cascade_depth_max: Cell<u32>,
     cascades_emitted: Cell<u64>,
     last_error_per_script: RefCell<BTreeMap<PathBuf, ClauseError>>,
+    /// Tokio runtime backing stdlib async ops (http, fs, process, ...).
+    /// Owned by the engine so every per-engine Lua VM has a runtime to
+    /// `block_on` regardless of whether the embedder holds their own.
+    /// `Arc` because modules and [`Promise`]s clone handles out of it.
+    rt: Arc<Runtime>,
     #[cfg(feature = "file-watch")]
     watcher: Option<ScriptWatcher>,
 }
@@ -151,6 +161,13 @@ impl LuamlEngine {
     /// consumer-held table handles share one VM — the only way to install a
     /// pre-built table into a clause environment without cross-VM copies.
     pub fn with_lua(lua: Lua) -> Result<Self, LuamlError> {
+        let rt = Arc::new(
+            Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(LuamlError::Io)?,
+        );
+        stdlib::install_all(&lua, rt.handle())?;
         Ok(Self {
             registry: ScriptRegistry::new(),
             api_bindings: Vec::new(),
@@ -164,9 +181,18 @@ impl LuamlEngine {
             cascade_depth_max: Cell::new(0),
             cascades_emitted: Cell::new(0),
             last_error_per_script: RefCell::new(BTreeMap::new()),
+            rt,
             #[cfg(feature = "file-watch")]
             watcher: None,
         })
+    }
+
+    /// Clone of the engine's tokio runtime handle. Stdlib modules and code
+    /// that spawns async work on behalf of a clause use this handle so every
+    /// task runs on the engine-owned runtime rather than a caller-provided
+    /// one. The handle is `Clone + Send + Sync`.
+    pub fn rt_handle(&self) -> tokio::runtime::Handle {
+        self.rt.handle().clone()
     }
 
     /// Replace the cascade configuration. New values apply to subsequent
@@ -396,8 +422,7 @@ impl LuamlEngine {
                     return;
                 }
                 ctx.budget_remaining -= 1;
-                self.cascades_emitted
-                    .set(self.cascades_emitted.get() + 1);
+                self.cascades_emitted.set(self.cascades_emitted.get() + 1);
                 self.dispatch_inner(&emission_event, ctx, outcomes, depth + 1);
             }
         }
@@ -405,10 +430,7 @@ impl LuamlEngine {
         ctx.unmark_visited(&sig);
     }
 
-    fn execute_matched<'a>(
-        &'a self,
-        m: ClauseMatch<'a>,
-    ) -> (ClauseOutcome<'a>, Vec<FieldMap>) {
+    fn execute_matched<'a>(&'a self, m: ClauseMatch<'a>) -> (ClauseOutcome<'a>, Vec<FieldMap>) {
         let exec = execute_clause(
             &self.lua,
             m.clause,
@@ -621,8 +643,7 @@ fn synthetic_cascade_outcome<'a>(kind: ClauseErrKind, message: String) -> Clause
     }
 }
 
-static SYNTHETIC_PATH: std::sync::LazyLock<PathBuf> =
-    std::sync::LazyLock::new(PathBuf::new);
+static SYNTHETIC_PATH: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(PathBuf::new);
 
 static SYNTHETIC_CLAUSE: std::sync::LazyLock<Clause> = std::sync::LazyLock::new(|| Clause {
     policy: clause::ExecutionPolicy { fields: Vec::new() },
@@ -691,11 +712,10 @@ mod tests {
             )
             .unwrap();
 
-        let results = engine
-            .dispatch(&event(&[
-                ("type", FieldValue::Enum("input".into())),
-                ("key", FieldValue::String("q".into())),
-            ]));
+        let results = engine.dispatch(&event(&[
+            ("type", FieldValue::Enum("input".into())),
+            ("key", FieldValue::String("q".into())),
+        ]));
 
         assert_eq!(results.len(), 1);
         let val: String = engine.lua().globals().get("result").unwrap();
@@ -709,8 +729,7 @@ mod tests {
             .register("test.luaml", "---\ntype: :input:\n---\nprint('hi')\n")
             .unwrap();
 
-        let results = engine
-            .dispatch(&event(&[("type", FieldValue::Enum("lifecycle".into()))]));
+        let results = engine.dispatch(&event(&[("type", FieldValue::Enum("lifecycle".into()))]));
 
         assert_eq!(results.len(), 0);
     }
@@ -751,8 +770,7 @@ mod tests {
             .register("b.luaml", "---\ntype: :input:\n---\nb_ran = true\n")
             .unwrap();
 
-        let results = engine
-            .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        let results = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
 
         assert_eq!(results.len(), 2);
         assert!(engine.lua().globals().get::<bool>("a_ran").unwrap());
@@ -777,11 +795,10 @@ mod tests {
             handler: handler.clone(),
         });
 
-        let results = engine
-            .dispatch(&event(&[
-                ("type", FieldValue::Enum("input".into())),
-                ("surface", FieldValue::Enum("tui".into())),
-            ]));
+        let results = engine.dispatch(&event(&[
+            ("type", FieldValue::Enum("input".into())),
+            ("surface", FieldValue::Enum("tui".into())),
+        ]));
 
         assert_eq!(results.len(), 1);
 
@@ -814,11 +831,10 @@ mod tests {
             handler: handler.clone(),
         });
 
-        engine
-            .dispatch(&event(&[
-                ("type", FieldValue::Enum("input".into())),
-                ("surface", FieldValue::Enum("runner".into())),
-            ]));
+        engine.dispatch(&event(&[
+            ("type", FieldValue::Enum("input".into())),
+            ("surface", FieldValue::Enum("runner".into())),
+        ]));
 
         // client should be nil in the :runner: clause
         assert!(engine.lua().globals().get::<bool>("result").unwrap());
@@ -846,21 +862,19 @@ result = \"tab\"
             .unwrap();
 
         // escape matches first clause
-        let results = engine
-            .dispatch(&event(&[
-                ("type", FieldValue::Enum("input".into())),
-                ("key", FieldValue::Enum("escape".into())),
-            ]));
+        let results = engine.dispatch(&event(&[
+            ("type", FieldValue::Enum("input".into())),
+            ("key", FieldValue::Enum("escape".into())),
+        ]));
         assert_eq!(results.len(), 1);
         let val: String = engine.lua().globals().get("result").unwrap();
         assert_eq!(val, "escape");
 
         // tab matches second clause
-        let results = engine
-            .dispatch(&event(&[
-                ("type", FieldValue::Enum("input".into())),
-                ("key", FieldValue::Enum("tab".into())),
-            ]));
+        let results = engine.dispatch(&event(&[
+            ("type", FieldValue::Enum("input".into())),
+            ("key", FieldValue::Enum("tab".into())),
+        ]));
         assert_eq!(results.len(), 1);
         let val: String = engine.lua().globals().get("result").unwrap();
         assert_eq!(val, "tab");
@@ -876,11 +890,10 @@ result = \"tab\"
             )
             .unwrap();
 
-        let results = engine
-            .dispatch(&event(&[
-                ("type", FieldValue::Enum("input".into())),
-                ("key", FieldValue::String("q".into())),
-            ]));
+        let results = engine.dispatch(&event(&[
+            ("type", FieldValue::Enum("input".into())),
+            ("key", FieldValue::String("q".into())),
+        ]));
 
         assert_eq!(results.len(), 1);
         assert_eq!(
@@ -898,8 +911,7 @@ result = \"tab\"
             .register("my/script.luaml", "---\ntype: :input:\n---\nprint('x')\n")
             .unwrap();
 
-        let results = engine
-            .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        let results = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].script_path, Path::new("my/script.luaml"));
@@ -916,19 +928,17 @@ result = \"tab\"
             .unwrap();
 
         // depth=0 fails guard — no dispatch
-        let results = engine
-            .dispatch(&event(&[
-                ("type", FieldValue::Enum("lifecycle".into())),
-                ("depth", FieldValue::Number(0)),
-            ]));
+        let results = engine.dispatch(&event(&[
+            ("type", FieldValue::Enum("lifecycle".into())),
+            ("depth", FieldValue::Number(0)),
+        ]));
         assert_eq!(results.len(), 0);
 
         // depth=3 passes guard
-        let results = engine
-            .dispatch(&event(&[
-                ("type", FieldValue::Enum("lifecycle".into())),
-                ("depth", FieldValue::Number(3)),
-            ]));
+        let results = engine.dispatch(&event(&[
+            ("type", FieldValue::Enum("lifecycle".into())),
+            ("depth", FieldValue::Number(3)),
+        ]));
         assert_eq!(results.len(), 1);
         let val: i64 = engine.lua().globals().get("result").unwrap();
         assert_eq!(val, 3);
@@ -941,8 +951,7 @@ result = \"tab\"
             .register("test.luaml", "---\ntype: :input:\n---\nerror(\"boom\")\n")
             .unwrap();
 
-        let outcomes =
-            engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        let outcomes = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
 
         assert_eq!(outcomes.len(), 1);
         let err = outcomes[0].result.as_ref().unwrap_err();
@@ -975,8 +984,7 @@ result = \"tab\"
         let count = engine.register_dir(&dir).unwrap();
         assert_eq!(count, 2);
 
-        let results = engine
-            .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        let results = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
         assert_eq!(results.len(), 2);
 
         let _ = fs::remove_dir_all(&dir);
@@ -996,8 +1004,7 @@ result = \"tab\"
             .unwrap();
 
         // First dispatch: only a matches
-        let results = engine
-            .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        let results = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
         assert_eq!(results.len(), 1);
 
         // Register another script
@@ -1006,8 +1013,7 @@ result = \"tab\"
             .unwrap();
 
         // Second dispatch: both match
-        let results = engine
-            .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        let results = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
         assert_eq!(results.len(), 2);
     }
 
@@ -1018,10 +1024,7 @@ result = \"tab\"
             .register("ok.luaml", "---\ntype: :input:\n---\nok_ran = true\n")
             .unwrap();
         engine
-            .register(
-                "bad.luaml",
-                "---\ntype: :input:\n---\nerror(\"broken\")\n",
-            )
+            .register("bad.luaml", "---\ntype: :input:\n---\nerror(\"broken\")\n")
             .unwrap();
 
         // Initial stats show nothing happened yet.
@@ -1069,16 +1072,12 @@ result = \"tab\"
 
         let handler = Arc::new(RecordingHandler::new(FieldValue::Number(7)));
         let mut engine = EngineBuilder::new()
-            .with_script(
-                "t.luaml",
-                "---\ntype: :input:\n---\nresult = svc.ping()\n",
-            )
+            .with_script("t.luaml", "---\ntype: :input:\n---\nresult = svc.ping()\n")
             .with_api("svc", handler.clone())
             .build()
             .unwrap();
 
-        let outcomes =
-            engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        let outcomes = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
         assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].result.is_ok());
         let val: i64 = engine.lua().globals().get("result").unwrap();
@@ -1090,10 +1089,7 @@ result = \"tab\"
     fn engine_builder_event_helper_builds_fieldmap() {
         use crate::testing::{enum_value, event as test_event, str_value};
 
-        let ev = test_event([
-            ("type", enum_value("input")),
-            ("key", str_value("q")),
-        ]);
+        let ev = test_event([("type", enum_value("input")), ("key", str_value("q"))]);
         assert_eq!(ev.get("type"), Some(&FieldValue::Enum("input".into())));
         assert_eq!(ev.get("key"), Some(&FieldValue::String("q".into())));
     }
@@ -1118,11 +1114,10 @@ result = \"tab\"
             handler: handler.clone(),
         });
 
-        let results = engine
-            .dispatch(&event(&[
-                ("type", FieldValue::Enum("input".into())),
-                ("surface", FieldValue::Enum("tui".into())),
-            ]));
+        let results = engine.dispatch(&event(&[
+            ("type", FieldValue::Enum("input".into())),
+            ("surface", FieldValue::Enum("tui".into())),
+        ]));
         assert_eq!(results.len(), 1);
         assert_eq!(handler.call_log().len(), 1);
         let val: i64 = engine.lua().globals().get("result").unwrap();
@@ -1148,8 +1143,7 @@ result = \"tab\"
         });
         assert!(engine.unregister_api(id));
 
-        let outcomes =
-            engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        let outcomes = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
         assert_eq!(outcomes.len(), 1);
         let err = outcomes[0].result.as_ref().unwrap_err();
         assert_eq!(err.kind, ClauseErrKind::Body);
@@ -1177,10 +1171,7 @@ result = \"tab\"
         let first = Arc::new(RecordingHandler::new(FieldValue::Number(1)));
         let second = Arc::new(RecordingHandler::new(FieldValue::Number(2)));
         engine
-            .register(
-                "t.luaml",
-                "---\ntype: :input:\n---\nresult = svc.ping()\n",
-            )
+            .register("t.luaml", "---\ntype: :input:\n---\nresult = svc.ping()\n")
             .unwrap();
 
         let id = engine.register_api(ApiBindingSpec {
@@ -1255,11 +1246,10 @@ result = \"tab\"
             handler: handler.clone(),
         });
 
-        let results = engine
-            .dispatch(&event(&[
-                ("type", FieldValue::Enum("input".into())),
-                ("surface", FieldValue::Enum("tui".into())),
-            ]));
+        let results = engine.dispatch(&event(&[
+            ("type", FieldValue::Enum("input".into())),
+            ("surface", FieldValue::Enum("tui".into())),
+        ]));
         assert_eq!(results.len(), 2);
 
         let calls = handler.call_log();
@@ -1305,8 +1295,7 @@ result = \"tab\"
             .register("b.luaml", "---\ntype: :input:\n---\nb_ran = true\n")
             .unwrap();
 
-        let outcomes =
-            engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        let outcomes = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
         assert_eq!(outcomes.len(), 2);
 
         let a = outcomes
@@ -1417,8 +1406,7 @@ result = \"tab\"
         assert!(engine.unregister("a.luaml"));
         assert_eq!(engine.registry().all().len(), 1);
 
-        let results = engine
-            .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        let results = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
         assert_eq!(results.len(), 1);
         assert!(engine.lua().globals().get::<bool>("b_ran").unwrap());
         let a_ran: mlua::Value = engine.lua().globals().get("a_ran").unwrap();
@@ -1451,8 +1439,7 @@ result = \"tab\"
         assert!(engine.replace_file(&path).unwrap());
         assert_eq!(engine.registry().all().len(), 1);
 
-        engine
-            .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
         let val: String = engine.lua().globals().get("result").unwrap();
         assert_eq!(val, "new");
 
@@ -1573,13 +1560,9 @@ result = \"tab\"
         assert_eq!(engine.reload_roots().unwrap(), 0);
 
         engine
-            .register(
-                "a.luaml",
-                "---\ntype: :input:\n---\nsvc.ping()\n",
-            )
+            .register("a.luaml", "---\ntype: :input:\n---\nsvc.ping()\n")
             .unwrap();
-        engine
-            .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
         assert_eq!(handler.call_log().len(), 1);
     }
 
@@ -1644,8 +1627,7 @@ result = \"tab\"
         engine.add_root(dir.clone()).unwrap();
         engine.watch(std::time::Duration::from_millis(50)).unwrap();
 
-        engine
-            .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
         let val: String = engine.lua().globals().get("result").unwrap();
         assert_eq!(val, "old");
 
@@ -1673,8 +1655,7 @@ result = \"tab\"
         let mut engine = LuamlEngine::new().unwrap();
         engine.watch(std::time::Duration::from_millis(50)).unwrap();
         assert!(engine.is_watching());
-        engine
-            .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
     }
 
     #[cfg(feature = "file-watch")]
@@ -1685,8 +1666,7 @@ result = \"tab\"
             .register("a.luaml", "---\ntype: :input:\n---\nran = true\n")
             .unwrap();
         assert!(!engine.is_watching());
-        let results = engine
-            .dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
+        let results = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
         assert_eq!(results.len(), 1);
         assert!(engine.lua().globals().get::<bool>("ran").unwrap());
     }
@@ -1717,11 +1697,10 @@ result = \"tab\"
                 "---\ntype: :input:\nsurface: :tui:\n---\nresult = svc.ping()\n",
             )
             .unwrap();
-        engine
-            .dispatch(&event(&[
-                ("type", FieldValue::Enum("input".into())),
-                ("surface", FieldValue::Enum("tui".into())),
-            ]));
+        engine.dispatch(&event(&[
+            ("type", FieldValue::Enum("input".into())),
+            ("surface", FieldValue::Enum("tui".into())),
+        ]));
         assert_eq!(handler.call_log().len(), 1);
     }
 
@@ -1763,10 +1742,7 @@ result = \"tab\"
     fn cascade_without_dispatch_call_is_no_op() {
         let mut engine = LuamlEngine::new().unwrap();
         engine
-            .register(
-                "a.luaml",
-                "---\ntype: :input:\n---\nresult = \"done\"\n",
-            )
+            .register("a.luaml", "---\ntype: :input:\n---\nresult = \"done\"\n")
             .unwrap();
 
         let outcomes = engine.dispatch(&event(&[("type", FieldValue::Enum("input".into()))]));
@@ -1830,11 +1806,19 @@ result = \"tab\"
             .filter(|o| {
                 matches!(
                     o.result,
-                    Err(ClauseError { kind: ClauseErrKind::CascadeDepth, .. })
+                    Err(ClauseError {
+                        kind: ClauseErrKind::CascadeDepth,
+                        ..
+                    })
                 )
             })
             .collect();
-        assert_eq!(depth_hits.len(), 1, "expected exactly one depth-limit outcome; got {:#?}", outcomes);
+        assert_eq!(
+            depth_hits.len(),
+            1,
+            "expected exactly one depth-limit outcome; got {:#?}",
+            outcomes
+        );
     }
 
     #[test]
@@ -1856,11 +1840,19 @@ result = \"tab\"
             .filter(|o| {
                 matches!(
                     o.result,
-                    Err(ClauseError { kind: ClauseErrKind::CascadeCycle, .. })
+                    Err(ClauseError {
+                        kind: ClauseErrKind::CascadeCycle,
+                        ..
+                    })
                 )
             })
             .collect();
-        assert_eq!(cycle_hits.len(), 1, "expected exactly one cycle outcome; got {:#?}", outcomes);
+        assert_eq!(
+            cycle_hits.len(),
+            1,
+            "expected exactly one cycle outcome; got {:#?}",
+            outcomes
+        );
     }
 
     #[test]
@@ -1891,11 +1883,18 @@ result = \"tab\"
             .filter(|o| {
                 matches!(
                     o.result,
-                    Err(ClauseError { kind: ClauseErrKind::CascadeBudget, .. })
+                    Err(ClauseError {
+                        kind: ClauseErrKind::CascadeBudget,
+                        ..
+                    })
                 )
             })
             .collect();
-        assert!(!budget_hits.is_empty(), "expected at least one budget outcome; got {:#?}", outcomes);
+        assert!(
+            !budget_hits.is_empty(),
+            "expected at least one budget outcome; got {:#?}",
+            outcomes
+        );
 
         let val: i64 = engine.lua().globals().get("result").unwrap();
         // With budget 3 we should see at most 3 worker runs.
@@ -1929,7 +1928,10 @@ result = \"tab\"
         assert_eq!(outcomes.len(), 1);
         assert!(matches!(
             outcomes[0].result,
-            Err(ClauseError { kind: ClauseErrKind::Body, .. })
+            Err(ClauseError {
+                kind: ClauseErrKind::Body,
+                ..
+            })
         ));
 
         let ran_count: i64 = engine.lua().globals().get("ran_count").unwrap_or(0);
@@ -1949,24 +1951,26 @@ result = \"tab\"
             .unwrap();
         // `b` also matches :kick: but errors — should not block the cascade from `a`.
         engine
-            .register(
-                "b.luaml",
-                "---\ntype: :kick:\n---\nerror(\"b broke\")\n",
-            )
+            .register("b.luaml", "---\ntype: :kick:\n---\nerror(\"b broke\")\n")
             .unwrap();
         engine
-            .register(
-                "c.luaml",
-                "---\ntype: :downstream:\n---\nran = true\n",
-            )
+            .register("c.luaml", "---\ntype: :downstream:\n---\nran = true\n")
             .unwrap();
 
         let outcomes = engine.dispatch(&event(&[("type", FieldValue::Enum("kick".into()))]));
 
         let ok_count = outcomes.iter().filter(|o| o.result.is_ok()).count();
         let err_count = outcomes.iter().filter(|o| o.result.is_err()).count();
-        assert_eq!(ok_count, 2, "a and c should succeed; got outcomes: {:#?}", outcomes);
-        assert_eq!(err_count, 1, "b should error; got outcomes: {:#?}", outcomes);
+        assert_eq!(
+            ok_count, 2,
+            "a and c should succeed; got outcomes: {:#?}",
+            outcomes
+        );
+        assert_eq!(
+            err_count, 1,
+            "b should error; got outcomes: {:#?}",
+            outcomes
+        );
 
         let ran: bool = engine.lua().globals().get("ran").unwrap();
         assert!(ran, "downstream c should have run even though b errored");
