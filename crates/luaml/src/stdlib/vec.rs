@@ -18,6 +18,7 @@
 //!   3. Userdata with a metatable is a pure perf optimization (no validation
 //!      on repeat use) but this module's operations are all O(n) over the
 //!      components anyway — per-call validation is a rounding error.
+//!
 //! If profiling later shows that validation dominates, swapping to userdata
 //! is a local change: the module's public surface (`vec.new`, `vec.add`, ...)
 //! is agnostic to the underlying representation.

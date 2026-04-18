@@ -123,20 +123,18 @@ impl ScriptRegistry {
             self.register_file(entry)?;
 
             // Verify extension declaration matches manifest.
-            if let Some(script) = self.scripts.last() {
-                if let Some(ext_name) = &script.extension {
-                    if let Some(manifest_paths) = extension_scripts.get(ext_name) {
-                        if !manifest_paths.contains(&canonical) {
-                            return Err(LuamlError::Parse {
-                                message: format!(
-                                    "script declares extension '{}' but is not listed in its manifest",
-                                    ext_name
-                                ),
-                                source_name: entry.display().to_string(),
-                            });
-                        }
-                    }
-                }
+            if let Some(script) = self.scripts.last()
+                && let Some(ext_name) = &script.extension
+                && let Some(manifest_paths) = extension_scripts.get(ext_name)
+                && !manifest_paths.contains(&canonical)
+            {
+                return Err(LuamlError::Parse {
+                    message: format!(
+                        "script declares extension '{}' but is not listed in its manifest",
+                        ext_name
+                    ),
+                    source_name: entry.display().to_string(),
+                });
             }
 
             count += 1;
@@ -195,10 +193,10 @@ impl ScriptRegistry {
     pub fn extension_names(&self) -> Vec<&str> {
         let mut names = Vec::new();
         for script in &self.scripts {
-            if let Some(ext) = &script.extension {
-                if !names.contains(&ext.as_str()) {
-                    names.push(ext.as_str());
-                }
+            if let Some(ext) = &script.extension
+                && !names.contains(&ext.as_str())
+            {
+                names.push(ext.as_str());
             }
         }
         names

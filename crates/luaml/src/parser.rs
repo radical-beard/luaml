@@ -1038,7 +1038,7 @@ search()
         assert_eq!(clause.annotations[0].0, "tool.description");
         assert_eq!(clause.field_annotations.get("query").unwrap().len(), 2);
         assert_eq!(clause.field_annotations.get("limit").unwrap().len(), 2);
-        assert!(clause.field_annotations.get("name").is_none());
+        assert!(!clause.field_annotations.contains_key("name"));
     }
 
     #[test]

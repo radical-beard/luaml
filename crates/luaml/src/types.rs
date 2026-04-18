@@ -69,12 +69,12 @@ mod tests {
 
     #[test]
     fn serde_roundtrip_float() {
-        roundtrip(FieldValue::Float(3.14));
+        roundtrip(FieldValue::Float(1.5));
     }
 
     #[test]
     fn serde_roundtrip_float_negative() {
-        roundtrip(FieldValue::Float(-2.718));
+        roundtrip(FieldValue::Float(-2.5));
     }
 
     #[test]

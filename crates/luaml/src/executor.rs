@@ -524,7 +524,7 @@ mod tests {
         let values = vec![
             FieldValue::String("hello".into()),
             FieldValue::Number(42),
-            FieldValue::Float(3.14),
+            FieldValue::Float(1.5),
             FieldValue::Bool(true),
             FieldValue::Null,
         ];

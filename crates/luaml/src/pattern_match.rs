@@ -751,8 +751,8 @@ mod tests {
     #[test]
     fn variable_captures_float() {
         let b =
-            match_field_value(&Pattern::Variable("x".into()), &FieldValue::Float(3.14)).unwrap();
-        assert_eq!(b["x"], FieldValue::Float(3.14));
+            match_field_value(&Pattern::Variable("x".into()), &FieldValue::Float(1.5)).unwrap();
+        assert_eq!(b["x"], FieldValue::Float(1.5));
     }
 
     #[test]
@@ -795,7 +795,7 @@ mod tests {
             head: Box::new(Pattern::Variable("h".into())),
             tail: Box::new(Pattern::Variable("t".into())),
         });
-        let items: Vec<FieldValue> = (0..100).map(|i| fv_num(i)).collect();
+        let items: Vec<FieldValue> = (0..100).map(fv_num).collect();
         let val = FieldValue::List(items);
         let b = match_field_value(&pat, &val).unwrap();
         assert_eq!(b["h"], fv_num(0));

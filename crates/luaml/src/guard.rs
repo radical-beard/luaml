@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn float_comparison() {
-        let b = bindings(&[("score", FieldValue::Float(3.14))]);
+        let b = bindings(&[("score", FieldValue::Float(3.5))]);
         assert!(evaluate_guard("score > 3", &b).unwrap());
         assert!(!evaluate_guard("score > 4", &b).unwrap());
     }

@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn from_io_error() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "fail");
+        let io_err = std::io::Error::other("fail");
         let err: LuamlError = io_err.into();
         assert!(matches!(err, LuamlError::Io(_)));
     }

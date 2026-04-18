@@ -1504,7 +1504,7 @@ result = \"tab\"
         assert_eq!(engine.roots().len(), 1);
         assert_eq!(engine.registry().all().len(), 1);
 
-        let second = engine.register_roots(&[dir.clone()]).unwrap();
+        let second = engine.register_roots(std::slice::from_ref(&dir)).unwrap();
         assert_eq!(second, 0);
         assert_eq!(engine.roots().len(), 1);
 
