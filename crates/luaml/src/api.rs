@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::pattern::Pattern;
@@ -55,6 +56,39 @@ pub struct ApiBindingId(pub(crate) u64);
 pub(crate) struct ApiBindingEntry {
     pub(crate) id: ApiBindingId,
     pub(crate) spec: ApiBindingSpec,
+}
+
+/// Library-mode local API binding — a builder that produces the namespace
+/// table directly in the engine's Lua VM.
+///
+/// Use this when the handler has non-`Send` state (e.g. `Rc<RefCell<_>>`
+/// references to consumer-owned mutable state) or when methods need direct
+/// access to `mlua` types (tables, functions, registry keys) rather than the
+/// typed-`FieldValue` shape that [`ApiHandler`] enforces.
+///
+/// The engine calls `build` once per matched clause and injects the resulting
+/// table at the namespace path in that clause's environment. The builder
+/// captures whatever state it needs; because the engine is single-threaded,
+/// `Rc`/`RefCell` are acceptable.
+pub type LocalApiBuilder = dyn Fn(&mlua::Lua) -> mlua::Result<mlua::Table> + 'static;
+
+/// Caller-facing declaration of a local-mode API namespace binding.
+///
+/// Pattern semantics mirror [`ApiBindingSpec`]: the binding applies to a
+/// clause when its policy fields match every `(key, pattern)` pair in
+/// `pattern`. An empty pattern means "universal".
+pub struct LocalApiBindingSpec {
+    pub namespace: String,
+    pub pattern: Vec<(String, Pattern)>,
+    pub builder: Rc<LocalApiBuilder>,
+}
+
+/// Internal storage: pairs an id with its spec so local bindings can be
+/// removed or hot-swapped alongside typed [`ApiBindingEntry`].
+pub(crate) struct LocalApiBindingEntry {
+    #[allow(dead_code)]
+    pub(crate) id: ApiBindingId,
+    pub(crate) spec: LocalApiBindingSpec,
 }
 
 #[cfg(test)]

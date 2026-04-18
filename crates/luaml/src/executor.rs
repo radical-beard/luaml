@@ -26,6 +26,7 @@ pub(crate) fn execute_clause(
     clause: &Clause,
     bindings: &FieldBindings,
     api_bindings: &[ApiBindingEntry],
+    local_api_bindings: &[crate::api::LocalApiBindingEntry],
 ) -> Result<Vec<FieldMap>, LuamlError> {
     let env = lua.create_table()?;
     let mt = lua.create_table()?;
@@ -43,6 +44,13 @@ pub(crate) fn execute_clause(
         let spec = &entry.spec;
         if spec.pattern.is_empty() || match_fields(&spec.pattern, &policy_as_fieldmap).is_some() {
             inject_api_namespace(lua, &env, &spec.namespace, spec.handler.clone())?;
+        }
+    }
+    for entry in local_api_bindings {
+        let spec = &entry.spec;
+        if spec.pattern.is_empty() || match_fields(&spec.pattern, &policy_as_fieldmap).is_some() {
+            let table = (spec.builder)(lua)?;
+            install_namespace_table(lua, &env, &spec.namespace, table)?;
         }
     }
 
@@ -115,6 +123,35 @@ fn clause_policy_to_fieldmap(clause: &Clause) -> FieldMap {
         }
     }
     map
+}
+
+/// Install a pre-built namespace table at the dotted path, creating any
+/// intermediate tables as needed. Used by local-mode builders whose closure
+/// returns a fully-populated `mlua::Table` directly.
+fn install_namespace_table(
+    lua: &Lua,
+    env: &mlua::Table,
+    namespace: &str,
+    table: mlua::Table,
+) -> LuaResult<()> {
+    let parts: Vec<&str> = namespace.split('.').collect();
+    let mut current_table = env.clone();
+    for (i, part) in parts.iter().enumerate() {
+        if i == parts.len() - 1 {
+            current_table.set(*part, table)?;
+            return Ok(());
+        }
+        let next: mlua::Table = match current_table.get::<mlua::Value>(*part)? {
+            mlua::Value::Table(t) => t,
+            _ => {
+                let t = lua.create_table()?;
+                current_table.set(*part, t.clone())?;
+                t
+            }
+        };
+        current_table = next;
+    }
+    Ok(())
 }
 
 /// Inject an API namespace into the Lua environment.
@@ -336,7 +373,7 @@ mod tests {
         let lua = Lua::new();
         let clause = test_clause(vec![], None, "result = 1 + 2");
 
-        execute_clause(&lua, &clause, &FieldBindings::new(), &[]).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &[], &[]).unwrap();
 
         let result: i64 = lua.globals().get("result").unwrap();
         assert_eq!(result, 3);
@@ -351,7 +388,7 @@ mod tests {
         bindings.insert("name".into(), FieldValue::String("agent".into()));
         bindings.insert("count".into(), FieldValue::Number(3));
 
-        execute_clause(&lua, &clause, &bindings, &[]).unwrap();
+        execute_clause(&lua, &clause, &bindings, &[], &[]).unwrap();
 
         let result: String = lua.globals().get("result").unwrap();
         assert_eq!(result, "agent_3");
@@ -374,7 +411,7 @@ mod tests {
             handler: handler.clone(),
         }]);
 
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
 
         let calls = handler.call_log();
         assert_eq!(calls.len(), 1);
@@ -402,7 +439,7 @@ mod tests {
             handler: handler.clone(),
         }]);
 
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
 
         let calls = handler.call_log();
         assert_eq!(calls.len(), 1);
@@ -430,7 +467,7 @@ mod tests {
             handler: handler.clone(),
         }]);
 
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
 
         // client should not be injected (pattern doesn't match)
         let result: bool = lua.globals().get("result").unwrap();
@@ -451,7 +488,7 @@ mod tests {
             handler: handler.clone(),
         }]);
 
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
 
         let result: String = lua.globals().get("result").unwrap();
         assert_eq!(result, "done");
@@ -475,7 +512,7 @@ mod tests {
             handler: Arc::new(FailHandler),
         }]);
 
-        let err = execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings);
+        let err = execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]);
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("something broke"));
     }
@@ -598,7 +635,7 @@ result_math = math.floor(3.7)
 result_sub = string.sub('hello', 1, 3)
 ",
         );
-        execute_clause(&lua, &clause, &FieldBindings::new(), &[]).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &[], &[]).unwrap();
         let rt: String = lua.globals().get("result_type").unwrap();
         assert_eq!(rt, "number");
         let rs: String = lua.globals().get("result_str").unwrap();
@@ -617,7 +654,7 @@ result_sub = string.sub('hello', 1, 3)
             None,
             "ok, err = pcall(function() error('boom') end)\nresult = not ok",
         );
-        execute_clause(&lua, &clause, &FieldBindings::new(), &[]).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &[], &[]).unwrap();
         let result: bool = lua.globals().get("result").unwrap();
         assert!(result);
     }
@@ -626,7 +663,7 @@ result_sub = string.sub('hello', 1, 3)
     fn lua_sets_global_visible_after() {
         let lua = Lua::new();
         let clause = test_clause(vec![], None, "my_global = 'persisted'");
-        execute_clause(&lua, &clause, &FieldBindings::new(), &[]).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &[], &[]).unwrap();
         let val: String = lua.globals().get("my_global").unwrap();
         assert_eq!(val, "persisted");
     }
@@ -635,7 +672,7 @@ result_sub = string.sub('hello', 1, 3)
     fn lua_empty_body_succeeds() {
         let lua = Lua::new();
         let clause = test_clause(vec![], None, "");
-        execute_clause(&lua, &clause, &FieldBindings::new(), &[]).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &[], &[]).unwrap();
     }
 
     // ── Return sandboxing ─────────────────────────────────────────
@@ -649,7 +686,7 @@ result_sub = string.sub('hello', 1, 3)
             None,
             "before = true\nif true then return end\n-- never reached but syntactically valid",
         );
-        execute_clause(&lua, &clause, &FieldBindings::new(), &[]).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &[], &[]).unwrap();
         let before: bool = lua.globals().get("before").unwrap();
         assert!(before);
     }
@@ -659,14 +696,14 @@ result_sub = string.sub('hello', 1, 3)
         let lua = Lua::new();
         // A script that's just `return` should work fine
         let clause = test_clause(vec![], None, "return");
-        execute_clause(&lua, &clause, &FieldBindings::new(), &[]).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &[], &[]).unwrap();
     }
 
     #[test]
     fn return_with_value_completes_without_error() {
         let lua = Lua::new();
         let clause = test_clause(vec![], None, "result = 'ok'\nreturn 42");
-        execute_clause(&lua, &clause, &FieldBindings::new(), &[]).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &[], &[]).unwrap();
         let val: String = lua.globals().get("result").unwrap();
         assert_eq!(val, "ok");
     }
@@ -675,7 +712,7 @@ result_sub = string.sub('hello', 1, 3)
     fn script_without_return_works_as_before() {
         let lua = Lua::new();
         let clause = test_clause(vec![], None, "a = 1\nb = 2\nc = a + b");
-        execute_clause(&lua, &clause, &FieldBindings::new(), &[]).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &[], &[]).unwrap();
         let c: i64 = lua.globals().get("c").unwrap();
         assert_eq!(c, 3);
     }
@@ -703,7 +740,7 @@ result_sub = string.sub('hello', 1, 3)
             },
         ]);
 
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
         let r1: String = lua.globals().get("r1").unwrap();
         let r2: String = lua.globals().get("r2").unwrap();
         assert_eq!(r1, "from_a");
@@ -723,7 +760,7 @@ result_sub = string.sub('hello', 1, 3)
             handler: handler.clone(),
         }]);
 
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
         let result: String = lua.globals().get("result").unwrap();
         assert_eq!(result, "deep");
     }
@@ -742,7 +779,7 @@ result_sub = string.sub('hello', 1, 3)
             pattern: vec![],
             handler,
         }]);
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
         let is_nil: bool = lua.globals().get("is_nil").unwrap();
         assert!(is_nil);
     }
@@ -766,7 +803,7 @@ result_sub = string.sub('hello', 1, 3)
             pattern: vec![],
             handler: Arc::new(ListHandler),
         }]);
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
         let len: i64 = lua.globals().get("result").unwrap();
         assert_eq!(len, 2);
     }
@@ -789,7 +826,7 @@ result_sub = string.sub('hello', 1, 3)
             pattern: vec![],
             handler: Arc::new(MapHandler),
         }]);
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
         let name: String = lua.globals().get("result").unwrap();
         assert_eq!(name, "agent");
     }
@@ -804,7 +841,7 @@ result_sub = string.sub('hello', 1, 3)
             pattern: vec![],
             handler: handler.clone(),
         }]);
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
         let calls = handler.call_log();
         assert_eq!(calls.len(), 1);
         assert!(calls[0].2.is_empty());
@@ -820,7 +857,7 @@ result_sub = string.sub('hello', 1, 3)
             pattern: vec![],
             handler: handler.clone(),
         }]);
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
         let calls = handler.call_log();
         assert_eq!(calls[0].2.len(), 10);
     }
@@ -835,7 +872,7 @@ result_sub = string.sub('hello', 1, 3)
             pattern: vec![],
             handler: handler.clone(),
         }]);
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
         let calls = handler.call_log();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].1, "first");
@@ -852,7 +889,7 @@ result_sub = string.sub('hello', 1, 3)
             pattern: vec![],
             handler,
         }]);
-        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap();
+        execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap();
         let result: i64 = lua.globals().get("result").unwrap();
         assert_eq!(result, 50);
     }
@@ -873,7 +910,7 @@ result_sub = string.sub('hello', 1, 3)
             pattern: vec![],
             handler: Arc::new(FailHandler),
         }]);
-        let err = execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings).unwrap_err();
+        let err = execute_clause(&lua, &clause, &FieldBindings::new(), &api_bindings, &[]).unwrap_err();
         assert!(err.to_string().contains("specific error message"));
     }
 

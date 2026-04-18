@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 
 use mlua::Lua;
 
-use api::{ApiBindingEntry, ApiBindingId, ApiBindingSpec};
+use api::{
+    ApiBindingEntry, ApiBindingId, ApiBindingSpec, LocalApiBindingEntry, LocalApiBindingSpec,
+};
 use clause::Clause;
 use error::LuamlError;
 use executor::execute_clause;
@@ -124,6 +126,7 @@ impl Default for CascadeConfig {
 pub struct LuamlEngine {
     registry: ScriptRegistry,
     api_bindings: Vec<ApiBindingEntry>,
+    local_api_bindings: Vec<LocalApiBindingEntry>,
     next_api_id: u64,
     lua: Lua,
     roots: Vec<PathBuf>,
@@ -142,6 +145,7 @@ impl LuamlEngine {
         Ok(Self {
             registry: ScriptRegistry::new(),
             api_bindings: Vec::new(),
+            local_api_bindings: Vec::new(),
             next_api_id: 0,
             lua: Lua::new(),
             roots: Vec::new(),
@@ -277,6 +281,28 @@ impl LuamlEngine {
         false
     }
 
+    /// Register a local-mode API namespace binding.
+    ///
+    /// Local bindings produce the namespace table directly in the engine's Lua
+    /// VM via a builder closure — for consumers whose handlers hold non-`Send`
+    /// state or need direct `mlua` access. Returns an opaque id for removal /
+    /// hot-swap. See [`LocalApiBindingSpec`] for details.
+    pub fn register_local_api(&mut self, spec: LocalApiBindingSpec) -> ApiBindingId {
+        let id = ApiBindingId(self.next_api_id);
+        self.next_api_id += 1;
+        self.local_api_bindings
+            .push(LocalApiBindingEntry { id, spec });
+        id
+    }
+
+    /// Remove a local-mode binding previously registered under `id`. Returns
+    /// true if a binding was removed.
+    pub fn unregister_local_api(&mut self, id: ApiBindingId) -> bool {
+        let before = self.local_api_bindings.len();
+        self.local_api_bindings.retain(|e| e.id != id);
+        self.local_api_bindings.len() != before
+    }
+
     /// Find all matching clauses without executing them.
     pub fn query(&self, event: &FieldMap) -> Vec<ClauseMatch<'_>> {
         self.registry.match_clauses(event)
@@ -374,7 +400,13 @@ impl LuamlEngine {
         &'a self,
         m: ClauseMatch<'a>,
     ) -> (ClauseOutcome<'a>, Vec<FieldMap>) {
-        let exec = execute_clause(&self.lua, m.clause, &m.bindings, &self.api_bindings);
+        let exec = execute_clause(
+            &self.lua,
+            m.clause,
+            &m.bindings,
+            &self.api_bindings,
+            &self.local_api_bindings,
+        );
         let (result, emissions) = match exec {
             Ok(emissions) => (
                 Ok(ClauseSuccess {
