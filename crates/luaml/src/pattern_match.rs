@@ -107,7 +107,7 @@ pub fn match_fields(
                 return None;
             }
         };
-        let bindings = match_field_value(pattern, value)?;
+        let bindings = match_field_value_with_context(pattern, value, &all_bindings)?;
         all_bindings.extend(bindings);
     }
     Some(all_bindings)
@@ -588,6 +588,33 @@ mod tests {
         input.insert("key".into(), fv_str("q"));
         let bindings = match_fields(&fields, &input).unwrap();
         assert_eq!(bindings["pressed"], fv_str("q"));
+    }
+
+    #[test]
+    fn match_fields_uses_previous_bindings_for_pins() {
+        let fields = vec![
+            ("first".into(), Pattern::Variable("x".into())),
+            ("second".into(), Pattern::Pin("x".into())),
+        ];
+        let mut input = HashMap::new();
+        input.insert("first".into(), fv_str("same"));
+        input.insert("second".into(), fv_str("same"));
+
+        let bindings = match_fields(&fields, &input).unwrap();
+        assert_eq!(bindings["x"], fv_str("same"));
+    }
+
+    #[test]
+    fn match_fields_rejects_pin_mismatch() {
+        let fields = vec![
+            ("first".into(), Pattern::Variable("x".into())),
+            ("second".into(), Pattern::Pin("x".into())),
+        ];
+        let mut input = HashMap::new();
+        input.insert("first".into(), fv_str("same"));
+        input.insert("second".into(), fv_str("different"));
+
+        assert!(match_fields(&fields, &input).is_none());
     }
 
     // ---- Pin matching ----
