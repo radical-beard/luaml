@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::clause::{Behavior, Clause, ExecutionPolicy, Script};
 use crate::error::LuamlError;
-use crate::pattern::{Pattern, parse_pattern_value};
+use crate::pattern::{Pattern, check_duplicate_variables, parse_pattern_value};
 
 /// Parse a .luaml file from source text into a Script.
 ///
@@ -308,6 +308,8 @@ fn parse_frontmatter_block(lines: &[&str], is_child: bool) -> Result<Frontmatter
         Some(guards.join(" and "))
     };
 
+    check_duplicate_variables(&fields)?;
+
     Ok(FrontmatterBlock {
         fields,
         guard,
@@ -431,6 +433,20 @@ print(pressed)
             clause.policy.fields.iter().find(|(k, _)| k == "key"),
             Some(&("key".into(), Pattern::Variable("pressed".into())))
         );
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_variable_bindings() {
+        let input = "\
+---
+type: :input:
+first: $x
+second: $x
+---
+print(x)
+";
+        let err = parse_luaml("dup.luaml", input).unwrap_err();
+        assert!(err.to_string().contains("duplicate variable name"));
     }
 
     #[test]
